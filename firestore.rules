@@ -1,0 +1,124 @@
+rules_version = '2';
+
+// PokerPal Firestore security rules.
+//
+// Deploy with:  firebase deploy --only firestore:rules
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* ─────────────────────  Helpers  ───────────────────── */
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // Fields changed by this update.
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    // Valid iff the caller is only adding/removing THEMSELVES to `followers`.
+    function followersChangeIsValid() {
+      let before = resource.data.get('followers', []);
+      let after = request.resource.data.get('followers', []);
+      let uid = request.auth.uid;
+
+      let isFollow =
+        !before.hasAny([uid]) &&
+        after.hasAny([uid]) &&
+        after.size() == before.size() + 1 &&
+        after.hasAll(before);
+
+      let isUnfollow =
+        before.hasAny([uid]) &&
+        !after.hasAny([uid]) &&
+        before.size() == after.size() + 1 &&
+        before.hasAll(after);
+
+      return isFollow || isUnfollow;
+    }
+
+    // Valid iff the caller is only adding/removing THEMSELVES to `participants`.
+    function participantsChangeIsValid() {
+      let before = resource.data.get('participants', []);
+      let after = request.resource.data.get('participants', []);
+      let uid = request.auth.uid;
+
+      let isJoin =
+        !before.hasAny([uid]) &&
+        after.hasAny([uid]) &&
+        after.size() == before.size() + 1 &&
+        after.hasAll(before);
+
+      let isLeave =
+        before.hasAny([uid]) &&
+        !after.hasAny([uid]) &&
+        before.size() == after.size() + 1 &&
+        before.hasAll(after);
+
+      return isJoin || isLeave;
+    }
+
+    /* ─────────────────────  USER PROFILES  ───────────────────── */
+    match /users/{userId} {
+      allow read: if signedIn();
+      allow create, delete: if signedIn() && request.auth.uid == userId;
+
+      // Owners can edit their whole doc; anyone else may only follow/unfollow
+      // (add or remove themselves from `followers`).
+      allow update: if signedIn() && (
+        request.auth.uid == userId ||
+        (changedKeys().hasOnly(['followers']) && followersChangeIsValid())
+      );
+    }
+
+    /* ─────────────────────  TOURNAMENTS  ───────────────────── */
+    match /tournaments/{tId} {
+      allow read: if signedIn();
+      allow create: if signedIn() &&
+        request.resource.data.createdBy == request.auth.uid;
+
+      // The organizer can edit/delete; anyone else may only join/leave
+      // (add or remove themselves from `participants`).
+      allow update: if signedIn() && (
+        resource.data.createdBy == request.auth.uid ||
+        (changedKeys().hasOnly(['participants']) && participantsChangeIsValid())
+      );
+      allow delete: if signedIn() &&
+        resource.data.createdBy == request.auth.uid;
+    }
+
+    /* ──────────────  TOURNAMENT METADATA (forward-looking)  ────────────── */
+    // Not written by the current app code yet — kept for planned features.
+    match /tournament_metadata/{tournamentId} {
+      allow read: if signedIn();
+      allow create: if signedIn() &&
+        request.resource.data.createdBy == request.auth.uid;
+      allow update, delete: if signedIn() &&
+        resource.data.createdBy == request.auth.uid;
+    }
+
+    /* ──────────────  TIMERS (blinds clock, forward-looking)  ────────────── */
+    match /timers/{timerId} {
+      allow read: if signedIn();
+      allow create: if signedIn() &&
+        request.resource.data.createdBy == request.auth.uid;
+      allow update, delete: if signedIn() &&
+        resource.data.createdBy == request.auth.uid;
+    }
+
+    /* ──────────────  ROSTERS (players lists / payments)  ────────────── */
+    // Private to the owner (organizer / creator of the saved list).
+    match /rosters/{rosterId} {
+      // resource == null lets a get on a not-yet-created doc succeed (returns
+      // "doesn't exist") so the app can then create it. Queries still require
+      // the ownerId filter, so this leaks nothing.
+      allow read: if signedIn() &&
+        (resource == null || resource.data.ownerId == request.auth.uid);
+      allow update, delete: if signedIn() &&
+        resource.data.ownerId == request.auth.uid;
+      allow create: if signedIn() &&
+        request.resource.data.ownerId == request.auth.uid;
+    }
+  }
+}
