@@ -120,5 +120,63 @@ service cloud.firestore {
       allow create: if signedIn() &&
         request.resource.data.ownerId == request.auth.uid;
     }
+
+    /* ──────────────  GROUPS (regulars, real users + guests)  ────────────── */
+    // Invitee accepts (self: pendingInvites -> memberUids) or declines
+    // (self: removed from pendingInvites only).
+    function inviteResponseIsValid() {
+      let uid = request.auth.uid;
+      let beforePending = resource.data.get('pendingInvites', []);
+      let afterPending = request.resource.data.get('pendingInvites', []);
+      let beforeMembers = resource.data.get('memberUids', []);
+      let afterMembers = request.resource.data.get('memberUids', []);
+      let selfRemovedFromPending =
+        beforePending.hasAny([uid]) &&
+        !afterPending.hasAny([uid]) &&
+        afterPending.size() == beforePending.size() - 1;
+      let accept =
+        selfRemovedFromPending &&
+        changedKeys().hasOnly(['pendingInvites', 'memberUids']) &&
+        afterMembers.hasAny([uid]) &&
+        afterMembers.size() == beforeMembers.size() + 1;
+      let decline =
+        selfRemovedFromPending &&
+        changedKeys().hasOnly(['pendingInvites']) &&
+        afterMembers.size() == beforeMembers.size();
+      return accept || decline;
+    }
+
+    // A non-owner member removes only themselves from memberUids.
+    function memberLeaveIsValid() {
+      let uid = request.auth.uid;
+      let before = resource.data.get('memberUids', []);
+      let after = request.resource.data.get('memberUids', []);
+      return uid != resource.data.ownerId &&
+        changedKeys().hasOnly(['memberUids']) &&
+        before.hasAny([uid]) &&
+        !after.hasAny([uid]) &&
+        before.size() == after.size() + 1 &&
+        before.hasAll(after);
+    }
+
+    match /groups/{groupId} {
+      // Readable by the owner, current members, and anyone with a pending
+      // invite (so they can see what they're being invited into).
+      allow read: if signedIn() && (
+        resource == null ||
+        resource.data.ownerId == request.auth.uid ||
+        request.auth.uid in resource.data.memberUids ||
+        request.auth.uid in resource.data.pendingInvites
+      );
+      allow create: if signedIn() &&
+        request.resource.data.ownerId == request.auth.uid &&
+        request.resource.data.memberUids.hasAll([request.auth.uid]);
+      allow update: if signedIn() && (
+        resource.data.ownerId == request.auth.uid ||
+        inviteResponseIsValid() ||
+        memberLeaveIsValid()
+      );
+      allow delete: if signedIn() && resource.data.ownerId == request.auth.uid;
+    }
   }
 }
