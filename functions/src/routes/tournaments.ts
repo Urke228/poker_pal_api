@@ -18,6 +18,7 @@ import {
   leaveTournament,
   listTournaments,
   mapTournament,
+  resolveUsernames,
   toDetail,
   updateTournament,
 } from "../services/tournaments";
@@ -35,7 +36,16 @@ tournamentsRouter.use(requireAuth);
 
 tournamentsRouter.get("/", async (req: AuthedRequest, res) => {
   const { filter } = listTournamentsQuerySchema.parse(req.query);
-  res.json({ tournaments: await listTournaments(uidOf(req), filter) });
+  const tournaments = await listTournaments(uidOf(req), filter);
+  // Resolved in one batched read so a list of N tournaments does not become
+  // N separate user lookups in the client, which is what both apps used to do.
+  const names = await resolveUsernames(tournaments.map((t) => t.createdBy));
+  res.json({
+    tournaments: tournaments.map((t) => ({
+      ...t,
+      organizerName: names.get(t.createdBy) ?? "Player",
+    })),
+  });
 });
 
 /** Resolve a private tournament's invite code without joining it. */
