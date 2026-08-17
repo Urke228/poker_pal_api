@@ -2,6 +2,7 @@ import cors from "cors";
 import express from "express";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler";
 import { requireAuth, uidOf, type AuthedRequest } from "./middleware/requireAuth";
+import { groupsRouter } from "./routes/groups";
 import { statsRouter } from "./routes/stats";
 import { tournamentsRouter } from "./routes/tournaments";
 import { usersRouter } from "./routes/users";
@@ -50,6 +51,7 @@ export function createApp() {
   });
 
   app.use("/tournaments", tournamentsRouter);
+  app.use("/groups", groupsRouter);
   app.use("/stats", statsRouter);
   app.use("/users", usersRouter);
 
