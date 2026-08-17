@@ -39,6 +39,41 @@ export function validatePlacements(results: FinalizeResultInput[]): void {
   }
 }
 
+/**
+ * Each player may appear at most once in a set of results.
+ *
+ * Without this, two results naming the same uid both resolve to the same user
+ * document and the second write silently overwrites the first, so one of the
+ * two entries vanishes with no error. Guest names are compared case-insensitively
+ * because that is how they are matched everywhere else.
+ */
+export function validateNoDuplicatePlayers(results: FinalizeResultInput[]): void {
+  const seenUids = new Set<string>();
+  const seenGuests = new Set<string>();
+
+  for (const r of results) {
+    if (r.uid) {
+      if (seenUids.has(r.uid)) {
+        throw badRequest(
+          "DUPLICATE_PLAYER",
+          "The same player appears more than once in the results.",
+        );
+      }
+      seenUids.add(r.uid);
+    }
+    if (r.guestName) {
+      const key = r.guestName.trim().toLowerCase();
+      if (seenGuests.has(key)) {
+        throw badRequest(
+          "DUPLICATE_PLAYER",
+          `${r.guestName} appears more than once in the results.`,
+        );
+      }
+      seenGuests.add(key);
+    }
+  }
+}
+
 /** Guards against paying out more than was ever collected. */
 export function validateWinnings(results: FinalizeResultInput[], pool: number): void {
   const total = results.reduce((sum, r) => sum + r.winnings, 0);
@@ -71,6 +106,7 @@ export async function finalizeTournament(
   }
 
   validatePlacements(results);
+  validateNoDuplicatePlayers(results);
   for (const r of results) assertKnownPlayer(players, r.uid, r.guestName);
   validateWinnings(results, prizePool(t, players));
 
@@ -113,8 +149,24 @@ export async function finalizeTournament(
       finalizedAt: FieldValue.serverTimestamp(),
     });
 
+    // A result naming an account that no longer exists is refused rather than
+    // skipped. Silently dropping it produced a finalization that reported a
+    // payout to someone whose history never received it, with nothing in the
+    // response or the logs to say so. Aborting here rolls the whole transaction
+    // back, so the organizer can correct the results and retry.
+    const missing = userSnaps
+      .map((snap, i) => (snap.exists ? null : registered[i]))
+      .filter((r): r is TournamentResult => r !== null);
+    if (missing.length > 0) {
+      throw badRequest(
+        "UNKNOWN_PLAYER",
+        missing.length === 1
+          ? `${missing[0].name} no longer has an account and cannot be given a result.`
+          : `${missing.length} players in these results no longer have accounts.`,
+      );
+    }
+
     userSnaps.forEach((snap, i) => {
-      if (!snap.exists) return;
       const result = registered[i];
       const player = byUid.get(result.uid as string);
       const current = Array.isArray(snap.data()?.tournaments) ? snap.data()!.tournaments : [];

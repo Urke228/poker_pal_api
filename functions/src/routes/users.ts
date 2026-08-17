@@ -1,8 +1,9 @@
 import { Router } from "express";
 import { requireAuth, uidOf, type AuthedRequest } from "../middleware/requireAuth";
 import { db, FieldValue, USERS } from "../lib/firestore";
-import { notFound } from "../lib/errors";
+import { forbidden, notFound } from "../lib/errors";
 import { getStats } from "../services/stats";
+import { ensureProfileSchema } from "../validation/schemas";
 
 export const usersRouter = Router();
 usersRouter.use(requireAuth);
@@ -39,7 +40,7 @@ usersRouter.post("/ensure-profile", async (req: AuthedRequest, res) => {
     return;
   }
 
-  const requested = typeof req.body?.username === "string" ? req.body.username.trim() : "";
+  const { username: requested } = ensureProfileSchema.parse(req.body ?? {});
   const fallback = (req.email ?? "").split("@")[0];
   const username = requested || fallback || "Player";
 
@@ -57,8 +58,26 @@ usersRouter.post("/ensure-profile", async (req: AuthedRequest, res) => {
   res.status(201).json({ created: true, username });
 });
 
-usersRouter.get("/:id/stats", async (req, res) => {
-  res.json(await getStats(req.params.id));
+/**
+ * A player's own statistics, addressed by uid.
+ *
+ * This is private financial history — every buy-in, rebuy and payout — so it is
+ * readable only by its owner. Requesting anyone else's is a 403 rather than a
+ * 404: the uid is not a secret (it appears in participant lists), so pretending
+ * the user does not exist would be misleading without protecting anything.
+ *
+ * There is deliberately no public projection of this data. Nothing in either
+ * client shows another player's results, so exposing a reduced form would add
+ * an unused surface. `/stats/me` remains the endpoint both clients actually
+ * use; this one exists so statistics are addressable as a sub-resource of a
+ * user, which is why it enforces the same ownership rule.
+ */
+usersRouter.get("/:id/stats", async (req: AuthedRequest, res) => {
+  const uid = uidOf(req);
+  if (req.params.id !== uid) {
+    throw forbidden("You can only view your own statistics.");
+  }
+  res.json(await getStats(uid));
 });
 
 usersRouter.get("/:id", async (req, res) => {

@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { assertOrganizer, payoutFractions } from "../src/services/tournaments";
 import { ApiError } from "../src/lib/errors";
-import { createTournamentSchema } from "../src/validation/schemas";
+import {
+  createTournamentSchema,
+  ensureProfileSchema,
+  updatePlayerSchema,
+} from "../src/validation/schemas";
 import type { Tournament } from "../src/types/models";
 
 const tournament = (over: Partial<Tournament> = {}): Tournament =>
@@ -121,5 +125,51 @@ describe("createTournamentSchema", () => {
         manualPayouts: [120],
       }),
     ).toThrow();
+  });
+});
+
+describe("updatePlayerSchema", () => {
+  it("accepts realistic counts", () => {
+    expect(() =>
+      updatePlayerSchema.parse({ buyInPaid: true, rebuys: 2, addOns: 1 }),
+    ).not.toThrow();
+  });
+
+  it("accepts an empty patch", () => {
+    expect(() => updatePlayerSchema.parse({})).not.toThrow();
+  });
+
+  it("rejects negative counts", () => {
+    expect(() => updatePlayerSchema.parse({ rebuys: -1 })).toThrow();
+    expect(() => updatePlayerSchema.parse({ addOns: -1 })).toThrow();
+  });
+
+  it("rejects fractional counts", () => {
+    expect(() => updatePlayerSchema.parse({ rebuys: 1.5 })).toThrow();
+  });
+
+  it("rejects counts large enough to distort the prize pool", () => {
+    // These multiply into the pool that finalization checks winnings against,
+    // so an implausible count would make that ceiling meaningless.
+    expect(() => updatePlayerSchema.parse({ rebuys: 1e15 })).toThrow();
+    expect(() => updatePlayerSchema.parse({ addOns: 101 })).toThrow();
+  });
+});
+
+describe("ensureProfileSchema", () => {
+  it("accepts an absent username, since the API falls back to the email", () => {
+    expect(() => ensureProfileSchema.parse({})).not.toThrow();
+  });
+
+  it("accepts a normal username and trims it", () => {
+    expect(ensureProfileSchema.parse({ username: "  Ada  " }).username).toBe("Ada");
+  });
+
+  it("rejects a whitespace-only username", () => {
+    expect(() => ensureProfileSchema.parse({ username: "   " })).toThrow();
+  });
+
+  it("rejects an absurdly long username", () => {
+    expect(() => ensureProfileSchema.parse({ username: "x".repeat(5000) })).toThrow();
   });
 });

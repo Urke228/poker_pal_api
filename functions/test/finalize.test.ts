@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { validatePlacements, validateWinnings } from "../src/services/finalize";
+import {
+  validateNoDuplicatePlayers,
+  validatePlacements,
+  validateWinnings,
+} from "../src/services/finalize";
 import { assertKnownPlayer, prizePool } from "../src/services/participants";
 import { ApiError } from "../src/lib/errors";
 import type { PlayerSummary, Tournament } from "../src/types/models";
@@ -84,6 +88,51 @@ describe("validatePlacements", () => {
     expect(
       codeOf(() => validatePlacements([{ uid: "u1", place: 2, winnings: 0 }])),
     ).toBe("INVALID_PLACEMENTS");
+  });
+});
+
+describe("validateNoDuplicatePlayers", () => {
+  it("accepts distinct players", () => {
+    expect(() =>
+      validateNoDuplicatePlayers([
+        { uid: "u1", place: 1, winnings: 0 },
+        { uid: "u2", place: 2, winnings: 0 },
+        { guestName: "Steve", place: 3, winnings: 0 },
+      ]),
+    ).not.toThrow();
+  });
+
+  it("rejects the same uid twice", () => {
+    // Both results resolve to one user document, so without this the second
+    // write silently overwrites the first and an entry disappears.
+    expect(
+      codeOf(() =>
+        validateNoDuplicatePlayers([
+          { uid: "u1", place: 1, winnings: 100 },
+          { uid: "u1", place: 2, winnings: 50 },
+        ]),
+      ),
+    ).toBe("DUPLICATE_PLAYER");
+  });
+
+  it("rejects the same guest twice, ignoring case and surrounding space", () => {
+    expect(
+      codeOf(() =>
+        validateNoDuplicatePlayers([
+          { guestName: "Steve", place: 1, winnings: 0 },
+          { guestName: "  steve ", place: 2, winnings: 0 },
+        ]),
+      ),
+    ).toBe("DUPLICATE_PLAYER");
+  });
+
+  it("does not confuse a guest with a registered player of the same name", () => {
+    expect(() =>
+      validateNoDuplicatePlayers([
+        { uid: "Steve", place: 1, winnings: 0 },
+        { guestName: "Steve", place: 2, winnings: 0 },
+      ]),
+    ).not.toThrow();
   });
 });
 

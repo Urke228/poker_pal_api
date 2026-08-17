@@ -85,11 +85,29 @@ export const addPlayerSchema = z
     message: "Provide either a uid (registered player) or a name (guest), not both.",
   });
 
+/**
+ * Rebuys and add-ons are counts, and they multiply into the prize pool that
+ * finalization checks winnings against. Left unbounded, an implausible count
+ * inflates that ceiling until it stops constraining anything, so cap them at a
+ * number no real tournament reaches.
+ */
+const MAX_REBUYS_PER_PLAYER = 100;
+
 export const updatePlayerSchema = z.object({
   name: z.string().trim().min(1).max(80).optional(),
   buyInPaid: z.boolean().optional(),
-  rebuys: z.number().int().min(0).optional(),
-  addOns: z.number().int().min(0).optional(),
+  rebuys: z
+    .number()
+    .int("Rebuys must be a whole number.")
+    .min(0, "Rebuys cannot be negative.")
+    .max(MAX_REBUYS_PER_PLAYER, `Rebuys must be ${MAX_REBUYS_PER_PLAYER} or fewer.`)
+    .optional(),
+  addOns: z
+    .number()
+    .int("Add-ons must be a whole number.")
+    .min(0, "Add-ons cannot be negative.")
+    .max(MAX_REBUYS_PER_PLAYER, `Add-ons must be ${MAX_REBUYS_PER_PLAYER} or fewer.`)
+    .optional(),
 });
 
 export const finalizeSchema = z.object({
@@ -117,6 +135,20 @@ export const statsEntrySchema = z.object({
   buyin: z.number().min(0, "Buy-in cannot be negative.").finite(),
   rebuy: z.number().min(0, "Rebuy cannot be negative.").finite().default(0),
   win: z.number().min(0, "Winnings cannot be negative.").finite(),
+});
+
+/**
+ * The username is optional — when it is absent the API falls back to the local
+ * part of the caller's email. The cap matters because this value is written
+ * straight into the profile document.
+ */
+export const ensureProfileSchema = z.object({
+  username: z
+    .string()
+    .trim()
+    .min(1, "Username cannot be empty.")
+    .max(60, "Username must be 60 characters or fewer.")
+    .optional(),
 });
 
 export const createGroupSchema = z.object({ name });

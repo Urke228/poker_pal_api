@@ -137,3 +137,64 @@ describe("unknown routes", () => {
     expect(res.body.error.code).toBe("NOT_FOUND");
   });
 });
+
+describe("malformed and oversized bodies", () => {
+  const post = (body: string, type = "application/json") =>
+    request(app)
+      .post("/tournaments")
+      .set("Authorization", `Bearer ${GOOD_TOKEN}`)
+      .set("Content-Type", type)
+      .send(body);
+
+  it("answers broken JSON with a 400 in the shared error envelope", async () => {
+    const res = await post('{"name": broken');
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("MALFORMED_JSON");
+    expect(res.body.error.message).toBe("The request body is not valid JSON.");
+  });
+
+  it("returns JSON, not an HTML error page", async () => {
+    const res = await post("{oops");
+    expect(res.headers["content-type"]).toMatch(/application\/json/);
+    expect(res.text).not.toContain("<!DOCTYPE");
+    expect(res.text).not.toContain("<pre>");
+  });
+
+  it("leaks no stack trace, file path or payload", async () => {
+    const res = await post('{"secret": oops');
+    const body = JSON.stringify(res.body);
+    expect(body).not.toMatch(/SyntaxError/);
+    expect(body).not.toMatch(/node_modules/);
+    // No filesystem path of either flavour, and nothing from the payload.
+    expect(body).not.toMatch(new RegExp("[A-Za-z]:\\\\\\\\"));
+    expect(body).not.toMatch(new RegExp("/(home|Users)/"));
+    expect(body).not.toContain("secret");
+  });
+
+  it("rejects a body over the size limit without a 500", async () => {
+    const huge = JSON.stringify({ name: "x".repeat(1_200_000) });
+    const res = await post(huge);
+    expect(res.status).toBe(413);
+    expect(res.body.error.code).toBe("PAYLOAD_TOO_LARGE");
+  });
+});
+
+describe("error envelope consistency", () => {
+  it("uses the same shape for 401, 404 and 400", async () => {
+    const unauth = await request(app).get("/tournaments");
+    const missing = await request(app).get("/no-such-route");
+    const invalid = await auth(request(app).post("/tournaments").send({}));
+
+    for (const res of [unauth, missing, invalid]) {
+      expect(res.headers["content-type"]).toMatch(/application\/json/);
+      expect(typeof res.body.error.code).toBe("string");
+      expect(typeof res.body.error.message).toBe("string");
+      expect(Object.keys(res.body)).toEqual(["error"]);
+    }
+  });
+
+  it("never exposes implementation detail in an error message", async () => {
+    const res = await request(app).get("/no-such-route");
+    expect(res.body.error.message).not.toMatch(/node_modules|at Object|\.ts:\d+/);
+  });
+});
