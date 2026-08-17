@@ -38,54 +38,37 @@ service cloud.firestore {
       return isFollow || isUnfollow;
     }
 
-    // Valid iff the caller is only adding/removing THEMSELVES to `participants`.
-    function participantsChangeIsValid() {
-      let before = resource.data.get('participants', []);
-      let after = request.resource.data.get('participants', []);
-      let uid = request.auth.uid;
-
-      let isJoin =
-        !before.hasAny([uid]) &&
-        after.hasAny([uid]) &&
-        after.size() == before.size() + 1 &&
-        after.hasAll(before);
-
-      let isLeave =
-        before.hasAny([uid]) &&
-        !after.hasAny([uid]) &&
-        before.size() == after.size() + 1 &&
-        before.hasAll(after);
-
-      return isJoin || isLeave;
-    }
-
     /* ─────────────────────  USER PROFILES  ───────────────────── */
     match /users/{userId} {
       allow read: if signedIn();
       allow create, delete: if signedIn() && request.auth.uid == userId;
 
-      // Owners can edit their whole doc; anyone else may only follow/unfollow
-      // (add or remove themselves from `followers`).
+      // Owners can edit their own profile, EXCEPT the `tournaments` array:
+      // that is the results history, written only by the API (which appends
+      // to it when a tournament is finalized). Leaving it client-writable
+      // would let a player edit their own record after the fact.
+      //
+      // Anyone else may only follow/unfollow (add or remove themselves from
+      // `followers`).
       allow update: if signedIn() && (
-        request.auth.uid == userId ||
+        (request.auth.uid == userId && !changedKeys().hasAny(['tournaments'])) ||
         (changedKeys().hasOnly(['followers']) && followersChangeIsValid())
       );
     }
 
     /* ─────────────────────  TOURNAMENTS  ───────────────────── */
+    // Read-only for clients. Every write — create, edit, delete, join, leave,
+    // participant changes and finalization — goes through the REST API, which
+    // enforces organizer-only access itself and settles the player-limit race
+    // in a transaction.
+    //
+    // The Admin SDK bypasses these rules entirely, so this block constrains
+    // only the clients; the API's own authorization checks are what protect
+    // the data. Reads stay open to any signed-in user because the roster and
+    // the clock still read the tournament document directly.
     match /tournaments/{tId} {
       allow read: if signedIn();
-      allow create: if signedIn() &&
-        request.resource.data.createdBy == request.auth.uid;
-
-      // The organizer can edit/delete; anyone else may only join/leave
-      // (add or remove themselves from `participants`).
-      allow update: if signedIn() && (
-        resource.data.createdBy == request.auth.uid ||
-        (changedKeys().hasOnly(['participants']) && participantsChangeIsValid())
-      );
-      allow delete: if signedIn() &&
-        resource.data.createdBy == request.auth.uid;
+      allow write: if false;
     }
 
     /* ──────────────  TOURNAMENT METADATA (forward-looking)  ────────────── */
@@ -159,6 +142,11 @@ service cloud.firestore {
         before.hasAll(after);
     }
 
+    // The REST API also exposes these operations (/groups/...), but unlike
+    // tournaments the mobile client still reads and writes groups directly:
+    // an invite has to appear for the invitee without them refreshing, which
+    // needs a live listener. The rules below therefore remain the real
+    // enforcement for group writes.
     match /groups/{groupId} {
       // Readable by the owner, current members, and anyone with a pending
       // invite (so they can see what they're being invited into).
