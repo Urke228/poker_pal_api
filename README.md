@@ -109,6 +109,9 @@ security rules entirely.
 | Rule | Where | Result when violated |
 |---|---|---|
 | Only the organizer may edit, delete or finalize a tournament, or change its players | `assertOrganizer` compares the stored `createdBy` with the token uid | `403 FORBIDDEN` |
+| A private tournament is visible only to its organizer, its participants, or someone presenting its invite code | `assertCanView` | `404 NOT_FOUND`, so an id cannot be probed |
+| Joining a private tournament requires the invite code | `assertCanJoin`, re-checked inside the join transaction | `403 FORBIDDEN` |
+| The invite code is returned only to the organizer | `forViewer` strips it for everyone else | field simply absent |
 | Only a group's owner may rename, delete, invite to it or manage its guests | `assertOwner` in the group service | `403 FORBIDDEN` |
 | Only the invited user may accept or decline their own invite | the acting uid comes from the token, and must already be in `pendingInvites` | `409 NO_INVITE` |
 | A group member may remove only themselves; the owner may remove anyone | `removeMember` | `403 FORBIDDEN` |
@@ -231,6 +234,15 @@ parseable.
 Returns the tournament with the organizer's name and the players list, so
 clients do not need a lookup per participant.
 
+A **public** tournament is readable by any signed-in user. A **private** one is
+readable by its organizer, its participants, or a caller presenting the invite
+code in an `X-Tournament-Code` header — a header rather than the query string so
+the code stays out of URLs, logs and referrers. Anyone else gets `404`, because a
+tournament id is meant to be unguessable and confirming one exists would itself
+disclose something.
+
+`inviteCode` is present in the response **only for the organizer**.
+
 → `200 {"tournament": TournamentDetail, "players": [Player]}` · `401` · `404`
 
 #### `PUT /tournaments/:id`
@@ -248,9 +260,20 @@ Organizer only. → `204` · `401` · `403` · `404`
 Resolves an invite code without joining. → `200 {"tournament": Tournament}` · `401` · `404`
 
 #### `POST /tournaments/:id/join`
-Transactional: re-reads the tournament, checks the limit, appends the caller.
+Transactional: re-reads the tournament, re-checks access, checks the limit,
+appends the caller.
 
-→ `200 {"tournament": Tournament}` · `401` · `404` ·
+A public tournament needs no body. A private one requires its code:
+
+```json
+{ "inviteCode": "ABC123" }
+```
+
+Sent in the body rather than the URL for the same reason as the header above.
+Knowing the id is not enough — without a valid code the answer is `403`. The
+organizer and existing participants never need to supply it.
+
+→ `200 {"tournament": Tournament}` · `401` · `403` · `404` ·
 `409 ALREADY_JOINED | TOURNAMENT_FULL | TOURNAMENT_FINISHED`
 
 #### `POST /tournaments/:id/leave`
@@ -629,9 +652,26 @@ Not everything belongs behind REST. These are deliberate:
 - **Profile and social writes.** Self-scoped, and the security rules already
   constrain them correctly.
 
-Firestore rules were tightened once the clients stopped writing: `tournaments` is
-now read-only to clients, and a user's `tournaments` array (their results
-history) is API-only, so a player cannot edit their own record after the fact.
+Firestore rules were tightened once the clients stopped writing. `tournaments` is
+read-only to clients, and a user's `tournaments` array (their results history) is
+API-only, so a player cannot edit their own record after the fact.
+
+The `tournaments` rules go further than "no writes":
+
+- **`list` is denied outright.** Nothing in either client queries the collection
+  directly — browsing goes through `GET /tournaments` — and leaving it open let
+  any signed-in user enumerate every tournament, private ones included, straight
+  from the client SDK. That was a larger hole than id-guessing, since it needed
+  no id at all.
+- **`get` is limited** to a public tournament, its organizer, or a participant.
+  Invite-code holders are deliberately *not* covered: a security rule cannot
+  verify a secret the client would have to hand it, so code-based access is
+  served by the API instead.
+
+Both remaining direct reads are organizer-only and unaffected: the players
+screen and the clock screen each read `tournaments/{id}` to seed their own
+document. The React clock reads `timers`, never `tournaments`, so the TV display
+is untouched. `npm run test:rules` proves all of this against the emulator.
 
 **The Admin SDK bypasses the security rules entirely.** The rules constrain only
 the clients. What protects the data behind the API is the authorization each
@@ -702,7 +742,8 @@ people racing for the last seat can both take it.
 cd functions
 npm install
 npm run build
-npm test          # vitest
+npm test          # unit + route tests, no emulator needed
+npm run test:rules # security rules, starts the Firestore emulator around them
 ```
 
 Development runs the Functions emulator while the Admin SDK talks to the real

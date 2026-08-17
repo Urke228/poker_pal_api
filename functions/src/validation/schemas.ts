@@ -76,6 +76,14 @@ export const listTournamentsQuerySchema = z.object({
   filter: z.enum(["mine", "registered", "public", "all"]).default("all"),
 });
 
+/**
+ * Joining a private tournament requires its invite code. It travels in the body
+ * rather than the query string so it stays out of URLs, logs and referrers.
+ */
+export const joinTournamentSchema = z.object({
+  inviteCode: z.string().trim().min(1).max(32).optional(),
+});
+
 export const addPlayerSchema = z
   .object({
     uid: z.string().trim().min(1).optional(),

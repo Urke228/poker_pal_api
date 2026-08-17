@@ -64,10 +64,36 @@ service cloud.firestore {
     //
     // The Admin SDK bypasses these rules entirely, so this block constrains
     // only the clients; the API's own authorization checks are what protect
-    // the data. Reads stay open to any signed-in user because the roster and
-    // the clock still read the tournament document directly.
+    // the data served over REST.
+    //
+    // `list` is denied outright. Nothing in either client queries this
+    // collection directly — all browsing goes through GET /tournaments — and
+    // leaving it open meant any signed-in user could enumerate every
+    // tournament, private ones included, straight from the client SDK. That
+    // was a bigger hole than the id-guessing one, because it needed no id.
+    //
+    // `get` is limited to people who already belong to the tournament. Code
+    // holders are deliberately NOT covered here: a security rule cannot check
+    // a code the client would have to supply, and code-based access is served
+    // by the API instead.
+    //
+    // Two direct reads depend on this rule, both organizer-only in practice
+    // and both covered by the createdBy clause:
+    //   - players_screen.dart  reads tournaments/{id} to seed the roster
+    //   - tournament_clock_screen.dart reads it to seed and name the clock doc
+    // The React clock reads `timers`, never this collection, so the TV display
+    // is unaffected.
     match /tournaments/{tId} {
-      allow read: if signedIn();
+      allow get: if signedIn() && (
+        // A get on a document that does not exist returns "doesn't exist"
+        // rather than a permission error, which is what the clock screen
+        // checks for.
+        resource == null ||
+        resource.data.get('isPublic', false) == true ||
+        resource.data.get('createdBy', '') == request.auth.uid ||
+        request.auth.uid in resource.data.get('participants', [])
+      );
+      allow list: if false;
       allow write: if false;
     }
 

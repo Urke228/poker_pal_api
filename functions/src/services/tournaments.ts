@@ -101,6 +101,75 @@ export function assertOrganizer(t: Tournament, uid: string) {
   }
 }
 
+/* ── Who may see a tournament ──────────────────────────────────────────────
+ *
+ * A public tournament is open to any signed-in user. A private one is a
+ * secret-code arrangement, not an invitee list: the organizer shares a code and
+ * whoever holds it gets in. So the people who may see it are the organizer, the
+ * players already in it, and anyone presenting the right code.
+ *
+ * These checks live here rather than in the security rules because the Admin
+ * SDK ignores rules entirely — every request the API serves is fully
+ * privileged, so this is the only thing standing between a document id and its
+ * contents.
+ */
+
+/** Invite codes are stored upper-case; compare them that way. */
+function codeMatches(t: Tournament, code?: string): boolean {
+  if (!t.inviteCode || !code) return false;
+  return t.inviteCode.toUpperCase() === code.trim().toUpperCase();
+}
+
+export function canView(t: Tournament, uid: string, code?: string): boolean {
+  if (t.isPublic) return true;
+  if (t.createdBy === uid) return true;
+  if (t.participants.includes(uid)) return true;
+  return codeMatches(t, code);
+}
+
+/**
+ * 404, not 403, when a private tournament is off limits.
+ *
+ * A tournament id is meant to be unguessable, so confirming that one exists is
+ * itself a disclosure. (This differs from `/users/:id/stats`, which answers 403
+ * precisely because a uid is *not* secret and denying its existence would
+ * mislead without protecting anything.)
+ */
+export function assertCanView(t: Tournament, uid: string, code?: string) {
+  if (!canView(t, uid, code)) throw notFound("That tournament");
+}
+
+/**
+ * Joining a private tournament needs the code, even though the id alone was
+ * once enough. Read access without join protection would be pointless: joining
+ * is the action with consequences.
+ *
+ * 403 here rather than 404 because the caller has demonstrably reached the
+ * tournament — they are being told the code is required, which is actionable.
+ */
+export function assertCanJoin(t: Tournament, uid: string, code?: string) {
+  if (t.isPublic) return;
+  if (t.createdBy === uid) return;
+  // Already in it: join will report ALREADY_JOINED, which is clearer than
+  // demanding a code they no longer need.
+  if (t.participants.includes(uid)) return;
+  if (codeMatches(t, code)) return;
+  throw forbidden("This tournament is private. Enter its invite code to join.");
+}
+
+/**
+ * Strips the invite code from a tournament unless the viewer owns it.
+ *
+ * The code is the credential that gates a private tournament, so it must not
+ * ride along in ordinary responses — a participant listing their tournaments
+ * has no need for it, and handing it out would let them pass it on.
+ */
+export function forViewer(t: Tournament, uid: string): Tournament {
+  if (t.createdBy === uid) return t;
+  const { inviteCode: _omitted, ...rest } = t;
+  return rest;
+}
+
 /** Resolves uid -> username in one batched read instead of N round trips. */
 export async function resolveUsernames(uids: string[]): Promise<Map<string, string>> {
   const unique = [...new Set(uids.filter(Boolean))];
@@ -185,12 +254,19 @@ export async function findByInviteCode(code: string): Promise<Tournament | null>
  * happen in one transaction — this is the invariant the mobile client could
  * only ever enforce optimistically.
  */
-export async function joinTournament(id: string, uid: string): Promise<Tournament> {
+export async function joinTournament(
+  id: string,
+  uid: string,
+  inviteCode?: string,
+): Promise<Tournament> {
   const ref = db().collection(TOURNAMENTS).doc(id);
   await db().runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if (!snap.exists) throw notFound("That tournament");
     const t = mapTournament(snap);
+    // Re-checked inside the transaction against the current document, so a
+    // tournament flipped to private mid-request cannot be joined on a stale read.
+    assertCanJoin(t, uid, inviteCode);
     if (t.status === "finished") {
       throw conflict("TOURNAMENT_FINISHED", "That tournament has already finished.");
     }
