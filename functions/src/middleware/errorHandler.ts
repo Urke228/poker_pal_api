@@ -1,5 +1,8 @@
 import type { NextFunction, Request, Response } from "express";
-import { logger } from "firebase-functions";
+// Imported from the logger entry point, not the package root: importing
+// `firebase-functions` itself pulls in the v1 compat layer, whose removed
+// config() call crashes the function on load under v7.
+import * as logger from "firebase-functions/logger";
 import { ZodError } from "zod";
 import { ApiError } from "../lib/errors";
 

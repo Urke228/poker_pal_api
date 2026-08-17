@@ -18,11 +18,12 @@
   "author": "",
   "license": "ISC",
   "type": "commonjs",
+  "//firebase-sdk-pins": "firebase-functions is held at v6 because v7 requires firebase-tools >= 15, while the installed CLI (14.3.1) still injects runtime config through the functions.config() API that v7 removed, which kills the function on load in the emulator. firebase-admin follows at v13 to satisfy functions v6's peer range. Only onRequest (v2), the logger, getAuth and getFirestore are used here, and all four are identical across these versions.",
   "dependencies": {
     "cors": "^2.8.6",
     "express": "^5.2.1",
-    "firebase-admin": "^14.2.0",
-    "firebase-functions": "^7.3.2",
+    "firebase-admin": "^13.6.0",
+    "firebase-functions": "^6.6.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
