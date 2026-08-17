@@ -2,6 +2,9 @@ import cors from "cors";
 import express from "express";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler";
 import { requireAuth, uidOf, type AuthedRequest } from "./middleware/requireAuth";
+import { statsRouter } from "./routes/stats";
+import { tournamentsRouter } from "./routes/tournaments";
+import { usersRouter } from "./routes/users";
 
 /**
  * Only these origins may call the API from a browser. The Flutter client is
@@ -45,6 +48,10 @@ export function createApp() {
   app.get("/me", requireAuth, async (req: AuthedRequest, res) => {
     res.json({ uid: uidOf(req), email: req.email ?? null });
   });
+
+  app.use("/tournaments", tournamentsRouter);
+  app.use("/stats", statsRouter);
+  app.use("/users", usersRouter);
 
   app.use(notFoundHandler);
   // Express 5 forwards rejected async handlers here, so routes can just throw.
