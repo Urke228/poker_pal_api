@@ -414,13 +414,38 @@ adb reverse tcp:5001 tcp:5001
 flutter run --dart-define=API_BASE_URL=http://127.0.0.1:5001/pokerpal-a1451/us-central1/api
 ```
 
-Deploy:
+### Deploying
+
+The Firestore rules deploy on their own and need nothing special:
 
 ```bash
-firebase deploy --only functions,firestore:rules
+firebase deploy --only firestore:rules
 ```
 
-The deployed base URL is
+The function is a different matter, and there are three things to know:
+
+1. **Cloud Functions require the Blaze plan.** `pokerpal-a1451` is currently on
+   Spark, so `firebase deploy --only functions` fails with
+   `Extensions require the Blaze plan`. Link a billing account first. Development
+   runs against the emulator, which needs none of this.
+2. **Source discovery times out at 10 s by default** on a cold start, which is
+   not enough here. Raise it, or the deploy fails with
+   `Cannot determine backend specification`:
+   ```bash
+   FUNCTIONS_DISCOVERY_TIMEOUT=180 firebase deploy --only functions
+   ```
+   The emulator needs the same treatment.
+3. **This repo deploys under its own codebase, `api`.** The project also has
+   three functions deployed under the `default` codebase — `helloWorld`,
+   `notifyOnNewParticipant` and `testFcm`, all in `europe-west3` — whose source
+   is not in any of the three repositories. Were this repo still called
+   `default`, deploying would treat those as removed, and `--force` would delete
+   them without asking. Keep the codebase name distinct.
+
+In PowerShell, quote the target list or it gets split on the comma:
+`firebase deploy --only "functions,firestore:rules"`.
+
+Once deployed the base URL is
 `https://us-central1-pokerpal-a1451.cloudfunctions.net/api`, which is what both
 clients fall back to when nothing is configured.
 

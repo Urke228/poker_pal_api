@@ -5,7 +5,8 @@
   "functions": [
     {
       "source": "functions",
-      "codebase": "default",
+      "//codebase": "Named 'api' rather than 'default' on purpose. The project still has three functions deployed under the 'default' codebase (helloWorld, notifyOnNewParticipant, testFcm, all in europe-west3) whose source is not in this repository. Deploying this repo as 'default' would treat them as deleted, and --force would remove them without asking. Giving this repo its own codebase means a deploy here only ever manages the functions defined here.",
+      "codebase": "api",
       "runtime": "nodejs20",
       "predeploy": ["npm --prefix \"$RESOURCE_DIR\" run build"]
     }
