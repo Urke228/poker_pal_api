@@ -15,9 +15,12 @@ Firebase Authentication supplies ID tokens used by both clients.
 
 - [Architecture](#architecture)
 - [Authentication](#authentication)
+- [Authorization](#authorization)
 - [Errors](#errors)
 - [Endpoints](#endpoints)
+- [Data model](#data-model)
 - [What still talks to Firestore directly](#what-still-talks-to-firestore-directly)
+- [Which operations both clients use](#which-operations-both-clients-use)
 - [Running it](#running-it)
 
 ## Architecture
@@ -56,6 +59,15 @@ Express application and Firestore is the database; the REST interface, the
 validation, the authorization and the error handling are all implemented here in
 the usual way.
 
+**One deliberate exception to "everything through REST": the tournament clock.**
+The organizer's phone controls it while a laptop or TV shows the same clock in
+the room, so a pause or a level change has to appear within a second. That is a
+push problem, and both clients subscribe to the `timers` document directly for
+it. Every other operation — creating and editing tournaments, joining and
+leaving, managing players, finalizing, statistics — goes through the REST
+service. Firestore's rules make this more than a convention: clients are denied
+write access to `tournaments` outright, so REST is the only path available.
+
 ### Why there is a server at all
 
 Two things in this application cannot be done correctly from a client:
@@ -87,6 +99,33 @@ is — `createdBy`, `ownerId` and the owner of a statistics entry all come from 
 token, so passing someone else's id changes nothing.
 
 Every route requires authentication except `GET /health`.
+
+## Authorization
+
+Authentication answers *who is calling*; these rules answer *what they may do*.
+All of them are enforced in the API, because the Admin SDK ignores the Firestore
+security rules entirely.
+
+| Rule | Where | Result when violated |
+|---|---|---|
+| Only the organizer may edit, delete or finalize a tournament, or change its players | `assertOrganizer` compares the stored `createdBy` with the token uid | `403 FORBIDDEN` |
+| Only a group's owner may rename, delete, invite to it or manage its guests | `assertOwner` in the group service | `403 FORBIDDEN` |
+| Only the invited user may accept or decline their own invite | the acting uid comes from the token, and must already be in `pendingInvites` | `409 NO_INVITE` |
+| A group member may remove only themselves; the owner may remove anyone | `removeMember` | `403 FORBIDDEN` |
+| A player's statistics are readable only by that player | `GET /users/:id/stats` compares the path id with the token uid | `403 FORBIDDEN` |
+| Statistics entries are always written to and deleted from the caller's own history | the uid is taken from the token; there is no parameter to point elsewhere | n/a — impossible to express |
+| A group is visible only to its owner, members and pending invitees | `assertVisible` | `404 NOT_FOUND`, so membership is not confirmed |
+
+Two consequences worth stating explicitly:
+
+- **No endpoint accepts an identity from the request.** No schema defines
+  `createdBy`, `ownerId` or `userId`, and unknown keys are stripped during
+  validation, so a body that tries to declare one is discarded before any
+  service sees it.
+- **Statistics have no public projection.** `GET /users/:id/stats` serves the
+  caller their own history and refuses everyone else. A player's buy-ins,
+  rebuys and payouts are private financial data, and nothing in either client
+  displays another player's results.
 
 ## Errors
 
@@ -360,6 +399,219 @@ guests without an account.
 Group responses are `{"group": Group}`. Errors: `400`, `401`, `403`, `404`,
 `409 ALREADY_MEMBER | ALREADY_INVITED | NO_INVITE | OWNER_CANNOT_LEAVE | DUPLICATE_GUEST`.
 
+## Data model
+
+Five top-level collections, all in one Firestore database. There are **no
+subcollections** — related data is either embedded in an array on the parent
+document or linked by document id.
+
+### `users`
+
+Profile, social graph and results history for one account.
+
+- **Document id:** the Firebase Auth uid, so a user document is addressable
+  directly from a token without a lookup.
+- **Created by:** the API, on `POST /users/ensure-profile`, which both clients
+  call after sign-up and after a first Google sign-in.
+- **Updated by:** the API (finalization and the statistics endpoints); the
+  Flutter app directly for profile edits and follow/unfollow.
+
+| Field | Type | Notes |
+|---|---|---|
+| `username` | string | Display name |
+| `username_lowercase` | string | Lower-cased copy, used for prefix search |
+| `email` | string \| null | From the auth token |
+| `photoURL`, `backgroundURL` | string | Paths into the mobile app's bundled assets |
+| `joinedAt` | timestamp | Server-set at creation |
+| `followers`, `following` | string[] | uids — the social graph, both directions stored |
+| `tournaments` | array of objects | **Results history.** Each `{id, date, title, buyin, rebuy, win}` |
+| `title`, `location`, `bio` | string | Optional, written only by the mobile profile screen |
+
+A history entry uses `buyin` (lower-case "i"), `rebuy` as a **money amount**
+rather than a count, `title` rather than `name`, and `date` as a plain
+`yyyy-MM-dd` string. These names differ from the tournament document on purpose:
+they are what is already stored, and renaming them would orphan existing data.
+
+### `tournaments`
+
+One tournament.
+
+- **Document id:** auto-generated.
+- **Created / updated by:** the API only. Clients cannot write this collection —
+  the security rules deny it outright.
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | string | |
+| `dateTime` | timestamp | When it is played |
+| `buyIn` | number | Note the capital "I", unlike a stats entry |
+| `playerLimit` | number | 2–100; `0` means unlimited |
+| `payoutStructure` | string | `standard` · `top-heavy` · `flat` · `winner-takes-all` · `manual` |
+| `manualPayouts` | number[] | Percentages 0–100. **Absent unless** the structure is `manual` |
+| `isPublic` | boolean | |
+| `inviteCode` | string | 6 characters. **Absent unless** the tournament is private |
+| `description`, `rules` | string | Free text |
+| `allowRebuys`, `allowAddons`, `lateRegistration` | boolean | Note `allowAddons`, unlike `addOns` elsewhere |
+| `createdBy` | string | Organizer uid → `users` |
+| `createdAt` | timestamp | Server-set |
+| `participants` | string[] | uids of registered players → `users` |
+| `status` | string | `open` or `finished`. **Absent means `open`** |
+| `results` | array of objects | Written by finalization: `{uid \| null, name, place, winnings}` |
+| `finalizedAt` | timestamp | Written by finalization |
+
+### `rosters`
+
+Per-event payment tracking, and the only place guests exist for a tournament.
+
+- **Document id:** the **tournament id** for a tournament's roster, so the link
+  is the id itself; auto-generated for a standalone saved list.
+- **Created / updated by:** the Flutter players screen directly; the API when
+  adding, updating or removing players.
+
+| Field | Type | Notes |
+|---|---|---|
+| `ownerId` | string | uid → `users` |
+| `name` | string | |
+| `tournamentId` | string | Absent for a standalone saved list |
+| `buyIn`, `payoutStructure`, `manualPayouts` | — | Copied from the tournament |
+| `players` | array of objects | `{name, uid?, buyInPaid, rebuys, addOns}` |
+
+A player row with a `uid` is a registered participant; one **without** a `uid` is
+a guest who has no account and appears nowhere else.
+
+### `groups`
+
+A reusable set of regular players.
+
+- **Document id:** auto-generated.
+- **Created / updated by:** the Flutter groups feature directly. The API exposes
+  the same operations but no client currently calls them.
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | string | |
+| `ownerId` | string | uid → `users` |
+| `memberUids` | string[] | uids → `users`; always includes the owner |
+| `pendingInvites` | string[] | uids invited but not yet accepted |
+| `guests` | array of objects | `{id, name}` — people with no account |
+| `createdAt`, `updatedAt` | timestamp | |
+
+### `timers`
+
+The live blinds clock. This is the one collection both clients read directly.
+
+- **Document id:** the **tournament id** for a tournament's clock; auto-generated
+  for a standalone clock.
+- **Created / updated by:** the Flutter clock screen. Read in real time by the
+  React clock page and by Flutter.
+
+| Field | Type | Notes |
+|---|---|---|
+| `createdBy` | string | uid → `users` |
+| `tournamentId` | string | Absent when standalone |
+| `tournamentName` | string | Kept in step with the tournament's name |
+| `buyIn`, `payoutStructure`, `manualPayouts` | — | Pushed from the tournament on save |
+| `levels` | array of objects | `{smallBlind, bigBlind, ante, durationMinutes, isBreak, name?}` |
+| `currentLevelIndex` | number | |
+| `isRunning` | boolean | |
+| `levelEndsAtMs` | number \| null | **Epoch milliseconds** — the timing anchor |
+| `pausedRemainingMs` | number | Remaining time while paused |
+| `startingStack`, `entries`, `playersRemaining`, `rebuys`, `addOns` | number | Display counters |
+| `isStandalone` | boolean | Written only when true |
+
+The clock stores an *anchor*, not a countdown: clients derive the current level
+and remaining time from `levelEndsAtMs` and the wall clock, so a running clock
+needs no writes at all.
+
+### Relationships
+
+```mermaid
+erDiagram
+    users ||--o{ tournaments : "organizes (createdBy)"
+    users }o--o{ tournaments : "plays in (participants[])"
+    users ||--o{ rosters : "owns (ownerId)"
+    users ||--o{ groups : "owns (ownerId)"
+    users }o--o{ groups : "member of (memberUids[])"
+    users }o--o{ groups : "invited to (pendingInvites[])"
+    users ||--o{ timers : "controls (createdBy)"
+    users }o--o{ users : "follows"
+    tournaments ||--o| rosters : "same document id"
+    tournaments ||--o| timers : "same document id"
+
+    users {
+        string username
+        string username_lowercase
+        string email
+        string_array followers
+        string_array following
+        object_array tournaments "results history"
+    }
+    tournaments {
+        string name
+        timestamp dateTime
+        number buyIn
+        number playerLimit
+        string payoutStructure
+        boolean isPublic
+        string inviteCode "private only"
+        string createdBy FK
+        string_array participants FK
+        string status "open | finished"
+        object_array results "after finalization"
+    }
+    rosters {
+        string ownerId FK
+        string tournamentId FK
+        object_array players "guests have no uid"
+    }
+    groups {
+        string name
+        string ownerId FK
+        string_array memberUids FK
+        string_array pendingInvites FK
+        object_array guests "no account"
+    }
+    timers {
+        string createdBy FK
+        string tournamentId FK
+        object_array levels
+        number levelEndsAtMs "timing anchor"
+        boolean isRunning
+    }
+```
+
+The same relationships as plain text:
+
+```
+users (id = auth uid)
+  ├─ organizes ──────────► tournaments.createdBy            1 : N
+  ├─ plays in ───────────► tournaments.participants[]       M : N
+  ├─ owns ───────────────► rosters.ownerId                  1 : N
+  ├─ owns ───────────────► groups.ownerId                   1 : N
+  ├─ member of ──────────► groups.memberUids[]              M : N
+  ├─ invited to ─────────► groups.pendingInvites[]          M : N
+  ├─ controls ───────────► timers.createdBy                 1 : N
+  ├─ follows ────────────► users.followers[] / following[]  M : N (self)
+  └─ embeds ─────────────► users.tournaments[]  results history
+
+tournaments (id)
+  ├─ rosters/{same id}   1 : 1   payment tracking + guests
+  ├─ timers/{same id}    1 : 1   live clock
+  └─ results[].uid ─────► users
+
+Guests are not users. They exist only as rows in rosters.players
+(uid absent) and in groups.guests[].
+```
+
+Two modelling notes worth knowing before reading the code:
+
+- **Dates are encoded three ways.** `tournaments.dateTime` is a Firestore
+  timestamp, a stats entry's `date` is a `yyyy-MM-dd` string, and the clock's
+  times are epoch-millisecond integers. Each suits its use — sortable, human
+  readable, and arithmetic-friendly respectively.
+- **`manualPayouts` and `inviteCode` are absent rather than null** when they do
+  not apply, so an update that stops applying them deletes the field.
+
 ## What still talks to Firestore directly
 
 Not everything belongs behind REST. These are deliberate:
@@ -384,6 +636,65 @@ history) is API-only, so a player cannot edit their own record after the fact.
 **The Admin SDK bypasses the security rules entirely.** The rules constrain only
 the clients. What protects the data behind the API is the authorization each
 endpoint performs for itself.
+
+## Which operations both clients use
+
+The point of the architecture is that the Android app and the web app are two
+clients of one service, not two applications that happen to share a database.
+These operations are exercised by both:
+
+| Operation | In Flutter | In React |
+|---|---|---|
+| `GET /tournaments?filter=…` | Tournaments tab and home screen | Tournaments page, three tabs |
+| `GET /tournaments/:id` | Details and Manage screens | Detail page and edit prefill |
+| `POST /tournaments` | Tournament setup screen | New tournament form |
+| `PUT /tournaments/:id` | Manage screen → Save | Edit form → Save changes |
+| `DELETE /tournaments/:id` | Manage screen → Delete | Detail page → Delete |
+| `POST /tournaments/:id/join` | Details → Sign Up | Detail → Join tournament |
+| `POST /tournaments/:id/leave` | Details → Leave | Detail → Leave tournament |
+| `GET /stats/me` | Stats screen | Stats page |
+| `POST` / `DELETE /stats/entries` | Add and delete a result | Add and delete a result |
+| `POST /users/ensure-profile` | After sign-up and first Google sign-in | After sign-up and first Google sign-in |
+
+Operations only one client performs: participant management and finalization are
+organizer tools and live on mobile; invite-code lookup is mobile-only. The web
+app displays participants and results but does not edit them.
+
+A sequence that demonstrates the shared service end to end: create a tournament
+on the web, watch it appear in the Flutter list, join it from a second account on
+the phone, then refresh the web detail page and see the new participant.
+
+## Why finalization is server-side
+
+Finalization is the clearest example of business logic that belongs in the
+application server rather than in each client, and it is worth understanding as
+the answer to "why not just put this in Flutter and React?".
+
+**It is impossible in a client.** Closing a tournament appends a result to *every*
+participant's statistics. The security rules let a client write only its own
+`users/{uid}` document — and that restriction is correct, since without it a
+player could edit their own record after the fact. So no client can perform this
+operation at all. The Admin SDK can, and does it in one transaction.
+
+**It must be atomic.** The standings, the status change and every player's
+statistics entry are written together. If any part fails, the transaction rolls
+back and nothing changes — there is no state where a tournament is closed but
+half the players' histories were updated.
+
+**It must be validated once.** Places must form a contiguous 1..N ranking with no
+duplicates and no gaps; no player may appear twice; every named player must still
+exist; total winnings may not exceed the prize pool derived from the roster.
+Implementing these twice, in Dart and in TypeScript, would mean two chances to
+get them wrong and two things to keep in step.
+
+**The clients only collect input.** The mobile finalization screen orders players
+and captures winnings; it computes nothing. Its two local checks exist to save a
+round trip, and the server's answer is authoritative — when it refuses, its
+message is shown as-is.
+
+The same reasoning applies in smaller form to `POST /tournaments/:id/join`, where
+the player-limit check and the participant append must be one transaction, or two
+people racing for the last seat can both take it.
 
 ## Running it
 
@@ -448,6 +759,26 @@ In PowerShell, quote the target list or it gets split on the comma:
 Once deployed the base URL is
 `https://us-central1-pokerpal-a1451.cloudfunctions.net/api`, which is what both
 clients fall back to when nothing is configured.
+
+#### The web client
+
+Deployed separately, from the `poker_pal_web` repository:
+
+```bash
+cd ../poker_pal_web
+npm run build
+firebase deploy --only hosting
+```
+
+This replaces the standalone clock page that previously occupied
+`pokerpal-a1451.web.app`, which is safe now that the mobile app shares
+`/clock?t=<id>` and the React app redirects the older `/?t=<id>` form to it
+before any authentication check. Hosting rewrites every path to `index.html`, so
+`/`, `/clock`, `/tournaments/:id` and `/tournaments/:id/edit` all work when
+opened directly or refreshed.
+
+Point `.env.local` at the deployed API before building for production, or the
+bundle will carry the emulator URL.
 
 ### CORS
 
