@@ -30,11 +30,10 @@ export function createApp() {
     cors({
       origin(origin, callback) {
         // Same-origin and non-browser callers (Flutter, curl) send no Origin.
-        if (!origin || ALLOWED_ORIGINS.includes(origin)) {
-          callback(null, true);
-          return;
-        }
-        callback(new Error(`Origin ${origin} is not allowed.`));
+        // An unlisted origin is refused by withholding the CORS headers, not
+        // by throwing: the browser blocks the response either way, and
+        // erroring here would turn every stray request into a 500.
+        callback(null, !origin || ALLOWED_ORIGINS.includes(origin));
       },
       credentials: false,
     }),

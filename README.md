@@ -428,8 +428,16 @@ clients fall back to when nothing is configured.
 
 Browsers may call the API from `localhost:5173`–`5175` and from
 `pokerpal-a1451.web.app` / `.firebaseapp.com`. Add new origins to
-`ALLOWED_ORIGINS` in `src/app.ts`. Flutter is not subject to CORS but uses the
-same routes.
+`ALLOWED_ORIGINS` in `src/app.ts`. An origin that is not on the list is refused
+by withholding the CORS headers rather than by failing the request. Flutter is
+not subject to CORS but uses the same routes.
+
+One caveat when testing locally: the Functions emulator enables
+firebase-functions' own permissive CORS wrapper, so **every origin appears to be
+accepted when running against the emulator**. The allowlist only actually
+restricts anything once deployed. Turning the wrapper off (`cors: false`) is not
+a fix — it would answer preflight requests with no headers at all and block the
+allowed origins too.
 
 ### A version pin worth knowing about
 
