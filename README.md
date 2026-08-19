@@ -428,6 +428,11 @@ Five top-level collections, all in one Firestore database. There are **no
 subcollections** — related data is either embedded in an array on the parent
 document or linked by document id.
 
+For the structural picture — an entity diagram, the embedded records written
+out as tables, and the relationships as plain text — see
+[docs/data-model.md](docs/data-model.md). What follows is the field-level
+detail.
+
 ### `users`
 
 Profile, social graph and results history for one account.
