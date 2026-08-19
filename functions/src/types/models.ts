@@ -84,6 +84,23 @@ export interface StatsEntry {
   /** A money amount of total rebuys, not a count. */
   rebuy: number;
   win: number;
+
+  /**
+   * Set only on entries written by finalizing a tournament; absent on the ones
+   * a player added by hand.
+   *
+   * A finished tournament records its outcome in two places — the standings on
+   * the tournament (who came where) and a cost/winnings row in each player's
+   * history. These two fields are what join the halves: without them the only
+   * link was the entry id, which encodes the tournament and player as
+   * `"<tournamentId>:<uid>"` and has to be parsed to be useful.
+   *
+   * Their presence also distinguishes a finalized result from a manual one,
+   * which previously could only be guessed from the shape of the id.
+   */
+  tournamentId?: string;
+  /** Finishing position, 1 being the winner. */
+  place?: number;
 }
 
 export interface StatsOverview {

@@ -180,6 +180,11 @@ export async function finalizeTournament(
         buyin: t.buyIn,
         rebuy: rebuyCost,
         win: result.winnings,
+        // Joins this row back to the standings on the tournament, and marks it
+        // as a finalized result rather than one the player typed in. The id
+        // already encodes both, but only as a string that has to be parsed.
+        tournamentId: t.id,
+        place: result.place,
       });
       tx.update(snap.ref, { tournaments: current });
     });

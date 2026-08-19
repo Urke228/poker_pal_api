@@ -11,7 +11,7 @@ import { buildChart, computeOverview } from "./statsMath";
  */
 function mapEntry(raw: unknown, index: number): StatsEntry {
   const e = (raw ?? {}) as Record<string, unknown>;
-  return {
+  const entry: StatsEntry = {
     // Legacy rows predate the id field; fall back to a positional id so they
     // can still be addressed for deletion.
     id: typeof e.id === "string" && e.id ? e.id : `legacy:${index}`,
@@ -21,6 +21,13 @@ function mapEntry(raw: unknown, index: number): StatsEntry {
     rebuy: asNumber(e.rebuy),
     win: asNumber(e.win),
   };
+  // Present only on finalized results, and absent on every entry written
+  // before these fields existed — so they stay optional rather than defaulted.
+  if (typeof e.tournamentId === "string" && e.tournamentId) {
+    entry.tournamentId = e.tournamentId;
+  }
+  if (typeof e.place === "number") entry.place = e.place;
+  return entry;
 }
 
 export async function readEntries(uid: string): Promise<StatsEntry[]> {

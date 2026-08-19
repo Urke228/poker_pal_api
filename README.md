@@ -447,13 +447,33 @@ Profile, social graph and results history for one account.
 | `photoURL`, `backgroundURL` | string | Paths into the mobile app's bundled assets |
 | `joinedAt` | timestamp | Server-set at creation |
 | `followers`, `following` | string[] | uids — the social graph, both directions stored |
-| `tournaments` | array of objects | **Results history.** Each `{id, date, title, buyin, rebuy, win}` |
+| `tournaments` | array of objects | **Results history.** Each `{id, date, title, buyin, rebuy, win}`, plus `tournamentId` and `place` on finalized rows |
 | `title`, `location`, `bio` | string | Optional, written only by the mobile profile screen |
 
 A history entry uses `buyin` (lower-case "i"), `rebuy` as a **money amount**
 rather than a count, `title` rather than `name`, and `date` as a plain
 `yyyy-MM-dd` string. These names differ from the tournament document on purpose:
 they are what is already stored, and renaming them would orphan existing data.
+
+**Where a finished tournament's outcome lives.** It is deliberately recorded in
+two places, because the two readers want different things:
+
+- `tournaments.results[]` holds the standings — `{uid, name, place, winnings}` —
+  which is what the tournament page shows.
+- each finisher's `users.tournaments[]` gains a row with what it cost them,
+  which is what their statistics need.
+
+Rows written by finalization carry `tournamentId` and `place`, so a history row
+joins back to the standings it came from and is self-describing. Rows a player
+added by hand have neither, which is also how the two are told apart — before
+these fields existed the only clue was the shape of the entry id, which encodes
+the pair as `"<tournamentId>:<uid>"` and had to be parsed. Entries predating the
+change simply lack both fields, so they read as manual, and nothing needed
+migrating.
+
+The request schema for a manual entry does not accept either field, and unknown
+keys are stripped during validation, so a client cannot forge a row that looks
+like a finalized result.
 
 ### `tournaments`
 
