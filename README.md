@@ -118,6 +118,8 @@ security rules entirely.
 | A player's statistics are readable only by that player | `GET /users/:id/stats` compares the path id with the token uid | `403 FORBIDDEN` |
 | Statistics entries are always written to and deleted from the caller's own history | the uid is taken from the token; there is no parameter to point elsewhere | n/a — impossible to express |
 | A group is visible only to its owner, members and pending invitees | `assertVisible` | `404 NOT_FOUND`, so membership is not confirmed |
+| A featured result can be chosen and renamed, never invented | `PUT /users/me/featured` copies place and winnings from the stored standings; the schema accepts no such fields | forged fields are stripped |
+| Only the organizer may publish or clear a seating chart | `assertOrganizer` on the seating routes | `403 FORBIDDEN` |
 
 Two consequences worth stating explicitly:
 
@@ -175,8 +177,9 @@ Public. → `200 {"ok": true}`
 → `200 {"uid": "...", "email": "..."}` · `401`
 
 #### `GET /users/me`
-Current user with profile fields.
-→ `200 {"uid","email","username","photoURL","hasProfile"}` · `401`
+Current user with profile fields. `followers` and `following` are counts, not
+uid lists.
+→ `200 {"uid","email","username","photoURL","backgroundURL","followers","following","hasProfile","featuredResults"}` · `401`
 
 #### `POST /users/ensure-profile`
 Creates `users/{uid}` if missing; a no-op otherwise. Both clients call this after
@@ -187,19 +190,35 @@ Body: `{"username": "Ada"}` (optional; falls back to the email's local part)
 → `201 {"created": true, "username": "Ada"}` · `200 {"created": false}` · `401`
 
 #### `GET /users/:id`
-→ `200 {"uid","username","photoURL"}` · `401` · `404`
+The public projection — nothing financial.
+→ `200 {"uid","username","photoURL","featuredResults"}` · `401` · `404`
+
+#### `PUT /users/me/featured`
+Sets which finished tournaments show on the caller's public profile. The body
+carries only tournament ids and optional display names; the server looks each
+result up in the real finalized standings and stores
+`{tournamentId, name, date, place, winnings}` from there — so a player can
+showcase and rename a result they earned, never fabricate one. Items with no
+result for the caller are skipped; duplicates are collapsed; at most 12.
+
+Body: `{"items": [{"tournamentId": "...", "name": "My first title"}]}`
+→ `200 {"featuredResults": [...]}` · `400` · `401` · `404` (a named tournament
+does not exist or is not visible to the caller)
 
 ---
 
 ### Tournaments
 
-#### `GET /tournaments?filter=mine|registered|public|all`
+#### `GET /tournaments?filter=mine|registered|public|all|archived`
 `mine` = organized by the caller, `registered` = joined by the caller, `public` =
-joinable (public, not the caller's own, not already joined), `all` = the union.
-Sorted newest first. Organizer names are resolved server-side in one batched
-read.
+joinable (public, not the caller's own, not already joined), `all` = the union,
+`archived` = finished tournaments the caller organized or played in. Finished
+tournaments are excluded from every active filter and appear only under
+`archived`. Sorted newest first. Organizer names are resolved server-side in one
+batched read, and each row carries a roster-derived `guestCount` so player
+counts can include guests.
 
-→ `200 {"tournaments": [Tournament & {organizerName}]}` · `400` (bad filter) · `401`
+→ `200 {"tournaments": [Tournament & {organizerName, guestCount}]}` · `400` (bad filter) · `401`
 
 #### `POST /tournaments`
 `createdBy` comes from the token. `organizerIsPlaying` and `groupMemberUids` seed
@@ -254,7 +273,10 @@ stored.
 → `200 {"tournament": Tournament}` · `400` · `401` · `403` · `404`
 
 #### `DELETE /tournaments/:id`
-Organizer only. → `204` · `401` · `403` · `404`
+Organizer only. Deletes the tournament **and its side-car documents** — the
+roster, published seating, timer and display-control docs all live under the
+tournament's own id and go with it in one atomic batch.
+→ `204` · `401` · `403` · `404`
 
 #### `GET /tournaments/by-code/:code`
 Resolves an invite code without joining. → `200 {"tournament": Tournament}` · `401` · `404`
@@ -328,16 +350,46 @@ Organizer only. The server-authoritative operation.
 
 Checks, in order: the caller is the organizer; the tournament exists and is not
 already finished; places form a contiguous 1..N ranking with no duplicates and no
-gaps; winnings are non-negative and do not exceed the prize pool derived from the
-roster; every `uid` is a participant and every `guestName` an existing guest.
+gaps; winnings are non-negative and **sum to the whole prize pool** (±$0.01 for
+floating-point splits) — the pool is `(paid entries + rebuys + add-ons) × buyIn`,
+derived from the roster; every `uid` is a participant and every `guestName` an
+existing guest.
 
 Then, in one transaction: writes `status: "finished"`, `results` and
-`finalizedAt`, and appends an entry to each registered finisher's
-`users/{uid}.tournaments`. Guests get none — they have no account.
+`finalizedAt`; stops the blinds clock (`timers/{id}.isRunning = false`); and
+writes one history row into each registered finisher's `stats/{uid}` document.
+The row id is deterministic (`tournamentId:uid`) and same-id rows are replaced
+rather than appended, so finish → restart → finish always nets exactly one
+entry. Guests get none — they have no account. A result naming a deleted account
+aborts the whole transaction rather than silently dropping a payout.
 
 → `200 {"status": "finished", "results": [TournamentResult]}` ·
 `400 INVALID_PLACEMENTS | INVALID_WINNINGS | UNKNOWN_PLAYER` ·
 `401` · `403` · `404` · `409 ALREADY_FINALIZED`
+
+#### `POST /tournaments/:id/unfinalize`
+Organizer only. The mirror image of finalize, for fixing mistakes ("Restart" in
+the app): reopens the tournament, deletes the stored standings, and removes
+exactly this tournament's row from every registered finisher's history — all in
+one transaction. The clock stays stopped.
+
+→ `204` · `401` · `403` · `404` · `409 NOT_FINALIZED`
+
+---
+
+### Seating
+
+The published seating chart the TV display shows. The collection itself is
+closed to all direct client access — a chart is a list of player names — so
+these routes are the only path. Firestore cannot store nested arrays, so
+`tables: (string|null)[][]` is stored as `[{seats: [...]}]` rows and mapped back
+to the flat shape on the wire.
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/tournaments/:id/seating` | Organizer only. Body `{"tables": [["Ada", null, "Grace"], …]}` (≤20 tables × ≤40 seats). The phone auto-publishes on randomize |
+| `GET` | `/tournaments/:id/seating` | Anyone who may view the tournament. → `{"tables", "updatedAt"}`, or `{"tables": null}` when none is published |
+| `DELETE` | `/tournaments/:id/seating` | Organizer only → `204` |
 
 ---
 
@@ -424,7 +476,7 @@ Group responses are `{"group": Group}`. Errors: `400`, `401`, `403`, `404`,
 
 ## Data model
 
-Five top-level collections, all in one Firestore database. There are **no
+Eight top-level collections, all in one Firestore database. There are **no
 subcollections** — related data is either embedded in an array on the parent
 document or linked by document id.
 
@@ -452,8 +504,28 @@ Profile, social graph and results history for one account.
 | `photoURL`, `backgroundURL` | string | Paths into the mobile app's bundled assets |
 | `joinedAt` | timestamp | Server-set at creation |
 | `followers`, `following` | string[] | uids — the social graph, both directions stored |
-| `tournaments` | array of objects | **Results history.** Each `{id, date, title, buyin, rebuy, win}`, plus `tournamentId` and `place` on finalized rows |
+| `featuredResults` | array of objects | **Public showcase.** `{tournamentId, name, date, place, winnings}` — written only by `PUT /users/me/featured`, which copies place and winnings from real standings |
 | `title`, `location`, `bio` | string | Optional, written only by the mobile profile screen |
+
+The user document is **fully public-safe**: every signed-in user can read it,
+and nothing financial lives on it. The results history used to be a
+`tournaments[]` array here — meaning anyone could read anyone's buy-ins — and
+now lives in the owner-only `stats` collection below. The rules still exclude
+the legacy field from client writes so it can never be reintroduced.
+
+### `stats`
+
+A player's private results history — every buy-in, rebuy and payout.
+
+- **Document id:** the Firebase Auth uid, same as `users`.
+- **Read:** owner only (enforced by rules for direct reads, by the API for REST).
+- **Written by:** the API only — finalization, unfinalization and the manual
+  stats endpoints. Reads fall back to the legacy `users.tournaments` field and
+  every write migrates-and-clears it.
+
+| Field | Type | Notes |
+|---|---|---|
+| `tournaments` | array of objects | Each `{id, date, title, buyin, rebuy, win}`, plus `tournamentId` and `place` on finalized rows |
 
 A history entry uses `buyin` (lower-case "i"), `rebuy` as a **money amount**
 rather than a count, `title` rather than `name`, and `date` as a plain
@@ -465,8 +537,8 @@ two places, because the two readers want different things:
 
 - `tournaments.results[]` holds the standings — `{uid, name, place, winnings}` —
   which is what the tournament page shows.
-- each finisher's `users.tournaments[]` gains a row with what it cost them,
-  which is what their statistics need.
+- each finisher's `stats/{uid}.tournaments[]` gains a row with what it cost
+  them, which is what their statistics need.
 
 Rows written by finalization carry `tournamentId` and `place`, so a history row
 joins back to the standings it came from and is self-describing. Rows a player
@@ -571,6 +643,37 @@ The clock stores an *anchor*, not a countdown: clients derive the current level
 and remaining time from `levelEndsAtMs` and the wall clock, so a running clock
 needs no writes at all.
 
+### `displays`
+
+The phone-to-TV remote-control channel: a tiny realtime doc the web display
+subscribes to.
+
+- **Document id:** the tournament id.
+- **Created / updated by:** the organizer's phone (rules: creator-only writes,
+  any signed-in read). Deleted by the tournament-delete cascade.
+
+| Field | Type | Notes |
+|---|---|---|
+| `createdBy` | string | uid → `users` |
+| `tab` | string | `clock` · `seating` · `entries` — which display tab the TV shows |
+| `seatingView` | string | `table` or `graphical` |
+| `refreshToken` | number | Bumped to make the TV re-fetch its REST data |
+
+### `seatings`
+
+The published seating chart, served over REST only — all direct client access is
+denied because a chart is a list of player names.
+
+- **Document id:** the tournament id.
+- **Created / updated by:** the API (`POST /tournaments/:id/seating`). Deleted
+  by the clear route or the tournament-delete cascade.
+
+| Field | Type | Notes |
+|---|---|---|
+| `ownerId` | string | The organizer |
+| `tables` | array of objects | `[{seats: (string\|null)[]}]` — Firestore forbids nested arrays, so the flat `string[][]` wire shape is wrapped per table |
+| `updatedAt` | timestamp | |
+
 ### Relationships
 
 ```mermaid
@@ -583,8 +686,11 @@ erDiagram
     users }o--o{ groups : "invited to (pendingInvites[])"
     users ||--o{ timers : "controls (createdBy)"
     users }o--o{ users : "follows"
+    users ||--o| stats : "same document id"
     tournaments ||--o| rosters : "same document id"
     tournaments ||--o| timers : "same document id"
+    tournaments ||--o| seatings : "same document id"
+    tournaments ||--o| displays : "same document id"
 
     users {
         string username
@@ -592,7 +698,18 @@ erDiagram
         string email
         string_array followers
         string_array following
-        object_array tournaments "results history"
+        object_array featuredResults "public showcase, API-written"
+    }
+    stats {
+        object_array tournaments "private results history, owner-only"
+    }
+    seatings {
+        object_array tables "published chart, API-only"
+    }
+    displays {
+        string tab
+        string seatingView
+        number refreshToken
     }
     tournaments {
         string name
@@ -640,12 +757,14 @@ users (id = auth uid)
   ├─ invited to ─────────► groups.pendingInvites[]          M : N
   ├─ controls ───────────► timers.createdBy                 1 : N
   ├─ follows ────────────► users.followers[] / following[]  M : N (self)
-  └─ embeds ─────────────► users.tournaments[]  results history
+  └─ owns (same id) ─────► stats/{uid}  private results history
 
 tournaments (id)
-  ├─ rosters/{same id}   1 : 1   payment tracking + guests
-  ├─ timers/{same id}    1 : 1   live clock
-  └─ results[].uid ─────► users
+  ├─ rosters/{same id}    1 : 1   payment tracking + guests
+  ├─ timers/{same id}     1 : 1   live clock
+  ├─ seatings/{same id}   1 : 1   published chart (API-only)
+  ├─ displays/{same id}   1 : 1   TV remote-control doc
+  └─ results[].uid ──────► users
 
 Guests are not users. They exist only as rows in rosters.players
 (uid absent) and in groups.guests[].
@@ -672,14 +791,19 @@ Not everything belongs behind REST. These are deliberate:
 - **The roster's payment tracking (`rosters`), on mobile.** A live per-player
   buy-in/rebuy/add-on tracker with frequent small writes. The API reads this
   collection for guests and the prize pool, but the tracker itself stays put.
+- **The display remote (`displays`), in both clients.** The phone writes which
+  tab the TV shows; the TV follows with a listener. Same shape as the clock:
+  creator-only writes, signed-in reads.
 - **Group reads, on mobile.** An invite should reach the invitee without them
   refreshing. Group *writes* are available over REST.
 - **Profile and social writes.** Self-scoped, and the security rules already
   constrain them correctly.
 
 Firestore rules were tightened once the clients stopped writing. `tournaments` is
-read-only to clients, and a user's `tournaments` array (their results history) is
-API-only, so a player cannot edit their own record after the fact.
+read-only to clients; the private history in `stats/{uid}` is owner-read,
+API-write; and the `featuredResults` and legacy `tournaments` fields on the user
+doc are excluded from client updates — so a player cannot edit their own record
+after the fact, and cannot fake a showcase card.
 
 The `tournaments` rules go further than "no writes":
 
@@ -801,10 +925,10 @@ firebase deploy --only firestore:rules
 
 The function is a different matter, and there are three things to know:
 
-1. **Cloud Functions require the Blaze plan.** `pokerpal-a1451` is currently on
-   Spark, so `firebase deploy --only functions` fails with
-   `Extensions require the Blaze plan`. Link a billing account first. Development
-   runs against the emulator, which needs none of this.
+1. **Cloud Functions require the Blaze plan.** `pokerpal-a1451` is on Blaze; if
+   a deploy ever fails with `Extensions require the Blaze plan`, the billing
+   link has come undone. Development runs against the emulator, which needs none
+   of this.
 2. **Source discovery times out at 10 s by default** on a cold start, which is
    not enough here. Raise it, or the deploy fails with
    `Cannot determine backend specification`:
