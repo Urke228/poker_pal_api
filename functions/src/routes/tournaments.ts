@@ -6,6 +6,7 @@ import {
   finalizeSchema,
   joinTournamentSchema,
   listTournamentsQuerySchema,
+  seatingSchema,
   updatePlayerSchema,
   updateTournamentSchema,
 } from "../validation/schemas";
@@ -28,10 +29,12 @@ import {
 import {
   addPlayer,
   listPlayers,
+  readRosterPlayers,
   removePlayer,
   updatePlayer,
 } from "../services/participants";
-import { finalizeTournament } from "../services/finalize";
+import { clearSeating, publishSeating, readSeating } from "../services/seating";
+import { finalizeTournament, unfinalizeTournament } from "../services/finalize";
 import { notFound } from "../lib/errors";
 
 export const tournamentsRouter = Router();
@@ -54,10 +57,18 @@ tournamentsRouter.get("/", async (req: AuthedRequest, res) => {
   // Resolved in one batched read so a list of N tournaments does not become
   // N separate user lookups in the client, which is what both apps used to do.
   const names = await resolveUsernames(tournaments.map((t) => t.createdBy));
+  // Guests live in the roster, not in `participants`, so the list count would
+  // otherwise read as 0 for a tournament that has only guests.
+  const guestCounts = await Promise.all(
+    tournaments.map(async (t) =>
+      (await readRosterPlayers(t.id)).filter((p) => p.uid === null).length,
+    ),
+  );
   res.json({
-    tournaments: tournaments.map((t) => ({
+    tournaments: tournaments.map((t, i) => ({
       ...forViewer(t, uid),
       organizerName: names.get(t.createdBy) ?? "Player",
+      guestCount: guestCounts[i],
     })),
   });
 });
@@ -121,6 +132,15 @@ tournamentsRouter.post("/:id/finalize", async (req: AuthedRequest, res) => {
   res.json({ status: "finished", results: stored });
 });
 
+// Reopens a finished tournament so the organizer can correct a mistake.
+tournamentsRouter.post("/:id/unfinalize", async (req: AuthedRequest, res) => {
+  const uid = uidOf(req);
+  const t = mapTournament(await getTournamentOrThrow(req.params.id));
+  assertOrganizer(t, uid);
+  await unfinalizeTournament(t);
+  res.json({ tournament: forViewer(mapTournament(await getTournamentOrThrow(t.id)), uid) });
+});
+
 /* ── participants ─────────────────────────────────────────────────────── */
 
 tournamentsRouter.get("/:id/players", async (req: AuthedRequest, res) => {
@@ -149,4 +169,30 @@ tournamentsRouter.delete("/:id/players/:playerId", async (req: AuthedRequest, re
   const t = mapTournament(await getTournamentOrThrow(req.params.id));
   assertOrganizer(t, uidOf(req));
   res.json({ players: await removePlayer(t, req.params.playerId) });
+});
+
+/* ── seating (published from the organizer app, shown on the web display) ─── */
+
+tournamentsRouter.get("/:id/seating", async (req: AuthedRequest, res) => {
+  const t = mapTournament(await getTournamentOrThrow(req.params.id));
+  // Same visibility as the tournament itself: seating carries player names, so
+  // a private tournament's chart must not be readable without access.
+  assertCanView(t, uidOf(req), tournamentCode(req));
+  // null when the organizer has not published a chart yet.
+  res.json({ seating: await readSeating(t.id) });
+});
+
+tournamentsRouter.post("/:id/seating", async (req: AuthedRequest, res) => {
+  const { tables } = seatingSchema.parse(req.body);
+  const uid = uidOf(req);
+  const t = mapTournament(await getTournamentOrThrow(req.params.id));
+  assertOrganizer(t, uid);
+  res.status(201).json({ seating: await publishSeating(t, uid, tables) });
+});
+
+tournamentsRouter.delete("/:id/seating", async (req: AuthedRequest, res) => {
+  const t = mapTournament(await getTournamentOrThrow(req.params.id));
+  assertOrganizer(t, uidOf(req));
+  await clearSeating(t.id);
+  res.status(204).send();
 });

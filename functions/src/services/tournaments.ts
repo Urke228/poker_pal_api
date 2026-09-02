@@ -1,7 +1,11 @@
 import type { DocumentData, DocumentSnapshot } from "firebase-admin/firestore";
 import {
   db,
+  DISPLAYS,
   FieldValue,
+  ROSTERS,
+  SEATINGS,
+  TIMERS,
   Timestamp,
   TOURNAMENTS,
   USERS,
@@ -202,7 +206,12 @@ export async function toDetail(
   };
 }
 
-export type TournamentFilter = "mine" | "registered" | "public" | "all";
+export type TournamentFilter =
+  | "mine"
+  | "registered"
+  | "public"
+  | "all"
+  | "archived";
 
 export async function listTournaments(
   uid: string,
@@ -216,6 +225,11 @@ export async function listTournaments(
     for (const doc of snap.docs) byId.set(doc.id, mapTournament(doc));
   };
 
+  // The archive is every finished tournament I ran or played in.
+  if (filter === "archived") {
+    await collect(col.where("createdBy", "==", uid));
+    await collect(col.where("participants", "array-contains", uid));
+  }
   if (filter === "mine" || filter === "all") {
     await collect(col.where("createdBy", "==", uid));
   }
@@ -232,6 +246,11 @@ export async function listTournaments(
   if (filter === "public") {
     out = out.filter((t) => t.createdBy !== uid && !t.participants.includes(uid));
   }
+  // Finished tournaments belong in the archive, not the active lists, so keep
+  // them out of everything except the archive filter itself.
+  out = out.filter((t) =>
+    filter === "archived" ? t.status === "finished" : t.status !== "finished",
+  );
   out.sort((a, b) => {
     const at = a.dateTime ? Date.parse(a.dateTime) : 0;
     const bt = b.dateTime ? Date.parse(b.dateTime) : 0;
@@ -381,5 +400,14 @@ export async function updateTournament(
 export async function deleteTournament(id: string, uid: string): Promise<void> {
   const snap = await getTournamentOrThrow(id);
   assertOrganizer(mapTournament(snap), uid);
-  await snap.ref.delete();
+  // A tournament carries four side-car documents under its own id. Deleting
+  // only the tournament left them orphaned forever — including a seating chart
+  // full of player names — so all five go together. delete() on a document
+  // that does not exist is a no-op, so nothing needs to check first.
+  const batch = db().batch();
+  batch.delete(snap.ref);
+  for (const collection of [ROSTERS, SEATINGS, TIMERS, DISPLAYS]) {
+    batch.delete(db().collection(collection).doc(id));
+  }
+  await batch.commit();
 }

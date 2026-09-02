@@ -72,6 +72,35 @@ beforeEach(async () => {
       tournamentName: "Secret game",
       isRunning: true,
     });
+    await setDoc(doc(db, "seatings/public-1"), {
+      ownerId: ORGANIZER,
+      tournamentId: "public-1",
+      tables: [{ seats: ["Mark", "Luka"] }],
+    });
+    await setDoc(doc(db, "displays/public-1"), {
+      createdBy: ORGANIZER,
+      tab: "seating",
+      refreshToken: 1,
+    });
+    await setDoc(doc(db, `users/${PARTICIPANT}`), {
+      username: "Ada",
+      followers: [],
+      following: [],
+      featuredResults: [
+        {
+          tournamentId: "public-1",
+          name: "Open game",
+          date: "2026-08-28T19:00:00.000Z",
+          place: 1,
+          winnings: 120,
+        },
+      ],
+    });
+    await setDoc(doc(db, `stats/${PARTICIPANT}`), {
+      tournaments: [
+        { id: "e1", date: "2026-08-28", title: "Open game", buyin: 20, rebuy: 20, win: 120 },
+      ],
+    });
   });
 });
 
@@ -181,5 +210,135 @@ describe("the clock is unaffected", () => {
 
   it("still refuses an unauthenticated reader", async () => {
     await assertFails(getDoc(doc(asAnon(), "timers/private-1")));
+  });
+});
+
+describe("displays — organizer controls, viewers follow", () => {
+  it("lets any signed-in viewer read the control doc (the TV follows)", async () => {
+    await assertSucceeds(getDoc(doc(asUser(STRANGER), "displays/public-1")));
+  });
+
+  it("lets the organizer update the active tab", async () => {
+    await assertSucceeds(
+      setDoc(doc(asUser(ORGANIZER), "displays/public-1"), {
+        createdBy: ORGANIZER,
+        tab: "clock",
+        refreshToken: 2,
+      }),
+    );
+  });
+
+  it("refuses a write from a non-owner", async () => {
+    await assertFails(
+      setDoc(doc(asUser(STRANGER), "displays/public-1"), {
+        createdBy: ORGANIZER,
+        tab: "clock",
+      }),
+    );
+  });
+
+  it("refuses an unauthenticated reader", async () => {
+    await assertFails(getDoc(doc(asAnon(), "displays/public-1")));
+  });
+});
+
+describe("tournament_metadata — removed collection stays closed", () => {
+  it("refuses writes now that its forward-looking rules are gone", async () => {
+    // The block was rules-only — nothing ever wrote the collection — so it was
+    // pure attack surface. With no matching rule everything is denied.
+    await assertFails(
+      setDoc(doc(asUser(ORGANIZER), "tournament_metadata/meta-1"), {
+        createdBy: ORGANIZER,
+      }),
+    );
+    await assertFails(getDoc(doc(asUser(ORGANIZER), "tournament_metadata/meta-1")));
+  });
+});
+
+describe("stats — the private history is owner-only", () => {
+  it("lets the owner read their own history", async () => {
+    await assertSucceeds(getDoc(doc(asUser(PARTICIPANT), `stats/${PARTICIPANT}`)));
+  });
+
+  it("refuses another signed-in user — this was the leak", async () => {
+    // Before the relocation this data sat on users/{uid}, readable by any
+    // signed-in user. The whole point of stats/{uid} is that this fails.
+    await assertFails(getDoc(doc(asUser(STRANGER), `stats/${PARTICIPANT}`)));
+  });
+
+  it("refuses an unauthenticated reader", async () => {
+    await assertFails(getDoc(doc(asAnon(), `stats/${PARTICIPANT}`)));
+  });
+
+  it("refuses every client write, even the owner's", async () => {
+    await assertFails(
+      setDoc(doc(asUser(PARTICIPANT), `stats/${PARTICIPANT}`), {
+        tournaments: [{ id: "forged", win: 999999 }],
+      }),
+    );
+  });
+});
+
+describe("users — featuredResults is API-only", () => {
+  it("still lets the owner edit ordinary profile fields", async () => {
+    await assertSucceeds(
+      setDoc(
+        doc(asUser(PARTICIPANT), `users/${PARTICIPANT}`),
+        { username: "Ada L." },
+        { merge: true },
+      ),
+    );
+  });
+
+  it("refuses the owner changing their own featuredResults", async () => {
+    await assertFails(
+      setDoc(
+        doc(asUser(PARTICIPANT), `users/${PARTICIPANT}`),
+        {
+          featuredResults: [
+            { tournamentId: "public-1", name: "Fake", place: 1, winnings: 999999 },
+          ],
+        },
+        { merge: true },
+      ),
+    );
+  });
+
+  it("refuses the legacy tournaments field too", async () => {
+    await assertFails(
+      setDoc(
+        doc(asUser(PARTICIPANT), `users/${PARTICIPANT}`),
+        { tournaments: [{ id: "forged", win: 999999 }] },
+        { merge: true },
+      ),
+    );
+  });
+
+  it("refuses anyone else entirely", async () => {
+    await assertFails(
+      setDoc(
+        doc(asUser(STRANGER), `users/${PARTICIPANT}`),
+        { featuredResults: [] },
+        { merge: true },
+      ),
+    );
+  });
+});
+
+describe("seatings — API-only, closed to clients", () => {
+  it("refuses a direct read even to the organizer", async () => {
+    // Seating is served through GET /tournaments/:id/seating (Admin SDK); no
+    // client reads the collection directly.
+    await assertFails(getDoc(doc(asUser(ORGANIZER), "seatings/public-1")));
+  });
+
+  it("refuses a direct read to any other signed-in user", async () => {
+    await assertFails(getDoc(doc(asUser(STRANGER), "seatings/public-1")));
+  });
+
+  it("refuses a direct write", async () => {
+    await assertFails(
+      setDoc(doc(asUser(ORGANIZER), "seatings/public-1"), { tables: [] }),
+    );
   });
 });

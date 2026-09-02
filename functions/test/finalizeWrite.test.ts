@@ -45,12 +45,14 @@ vi.mock("firebase-admin/firestore", async (importOriginal) => {
           get: (ref: { path: string; id: string }) => Promise<unknown>;
           getAll: (...refs: { path: string; id: string }[]) => Promise<unknown[]>;
           update: (ref: { path: string }, data: Record<string, unknown>) => void;
+          set: (ref: { path: string }, data: Record<string, unknown>, opts?: unknown) => void;
         }) => Promise<void>,
       ) =>
         fn({
           get: async (ref) => snapshotOf(ref.path, ref.id),
           getAll: async (...refs) => refs.map((r) => snapshotOf(r.path, r.id)),
           update: (ref, data) => writes.push({ path: ref.path, data }),
+          set: (ref, data) => writes.push({ path: ref.path, data }),
         }),
     }),
   };
@@ -67,9 +69,13 @@ const TID = "t-1";
 const as = (req: request.Test, uid: string) =>
   req.set("Authorization", `Bearer token:${uid}`);
 
-/** The entry appended to a player's history by the last write touching them. */
+/**
+ * The entry appended to a player's history by the last write touching them.
+ * History rows live in the owner-only `stats/{uid}` doc, not the public
+ * profile — that relocation is exactly what the leak fix is about.
+ */
 const historyFor = (uid: string) => {
-  const write = [...writes].reverse().find((w) => w.path === `users/${uid}`);
+  const write = [...writes].reverse().find((w) => w.path === `stats/${uid}`);
   const list = (write?.data.tournaments ?? []) as Record<string, unknown>[];
   return list[list.length - 1];
 };
@@ -163,15 +169,41 @@ describe("finalization writes", () => {
 
   it("writes no history for a guest, who has no account", async () => {
     await finalize();
-    const touched = writes.filter((w) => w.path.startsWith("users/"));
+    const touched = writes.filter((w) => w.path.startsWith("stats/"));
     expect(touched.map((w) => w.path).sort()).toEqual(
-      [`users/${RUNNER_UP}`, `users/${WINNER}`].sort(),
+      [`stats/${RUNNER_UP}`, `stats/${WINNER}`].sort(),
     );
+  });
+
+  it("keeps history off the public profile doc", async () => {
+    await finalize();
+    // The user docs seeded here still carry the legacy `tournaments` field, so
+    // finalize both writes the row to `stats/{uid}` and clears the old field —
+    // no write may ever put history rows back on `users/{uid}`.
+    for (const w of writes.filter((x) => x.path.startsWith("users/"))) {
+      expect(Array.isArray(w.data.tournaments)).toBe(false);
+    }
+    expect(historyFor(WINNER)).toBeDefined();
   });
 
   it("still names the guest in the standings", async () => {
     const res = await finalize();
     expect(res.body.results[2]).toMatchObject({ name: "Steve", uid: null, place: 3 });
+  });
+
+  it("never duplicates a row for the same tournament and player", async () => {
+    // A stale copy of this tournament's row is already in the history (e.g. a
+    // partially reversed restart). Finalizing must replace it, not append a
+    // second one — otherwise finish → restart → finish doubles the winnings.
+    docs.set(`stats/${WINNER}`, {
+      tournaments: [
+        { id: `${TID}:${WINNER}`, date: "2026-08-01", title: "Friday game", buyin: 20, rebuy: 0, win: 60 },
+      ],
+    });
+    await finalize();
+    const write = [...writes].reverse().find((w) => w.path === `stats/${WINNER}`);
+    const rows = (write?.data.tournaments ?? []) as { id?: string }[];
+    expect(rows.filter((r) => r.id === `${TID}:${WINNER}`)).toHaveLength(1);
   });
 
   it("refuses a second finalization", async () => {

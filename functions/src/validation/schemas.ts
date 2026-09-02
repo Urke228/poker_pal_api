@@ -73,7 +73,7 @@ export const updateTournamentSchema = z
   .superRefine(requireManualPayouts);
 
 export const listTournamentsQuerySchema = z.object({
-  filter: z.enum(["mine", "registered", "public", "all"]).default("all"),
+  filter: z.enum(["mine", "registered", "public", "all", "archived"]).default("all"),
 });
 
 /**
@@ -135,6 +135,26 @@ export const finalizeSchema = z.object({
     .min(1, "Provide at least one result."),
 });
 
+/**
+ * A published seating chart: one entry per table, each an array of seats. A seat
+ * holds the seated player's display name, or null when empty. The caps mirror
+ * the organizer app's own limits (8 tables × 40 seats) with a little headroom so
+ * a valid chart is never rejected.
+ */
+const MAX_TABLES = 20;
+const MAX_SEATS_PER_TABLE = 40;
+
+export const seatingSchema = z.object({
+  tables: z
+    .array(
+      z
+        .array(z.string().trim().max(80).nullable())
+        .max(MAX_SEATS_PER_TABLE, `A table can have at most ${MAX_SEATS_PER_TABLE} seats.`),
+    )
+    .min(1, "Provide at least one table.")
+    .max(MAX_TABLES, `A seating chart can have at most ${MAX_TABLES} tables.`),
+});
+
 export const statsEntrySchema = z.object({
   date: z
     .string()
@@ -157,6 +177,22 @@ export const ensureProfileSchema = z.object({
     .min(1, "Username cannot be empty.")
     .max(60, "Username must be 60 characters or fewer.")
     .optional(),
+});
+
+/**
+ * The featured showcase takes only tournament ids and optional display names —
+ * never a place or winnings. Those are looked up in the finalized standings by
+ * the API, which is what makes the showcase trustworthy.
+ */
+export const featuredSchema = z.object({
+  items: z
+    .array(
+      z.object({
+        tournamentId: z.string().trim().min(1, "A tournament id is required."),
+        name: z.string().trim().max(120, "Name must be 120 characters or fewer.").optional(),
+      }),
+    )
+    .max(12, "You can feature at most 12 tournaments."),
 });
 
 export const createGroupSchema = z.object({ name });

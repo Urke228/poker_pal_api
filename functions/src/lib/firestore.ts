@@ -11,8 +11,12 @@ export { FieldValue, Timestamp };
 
 export const TOURNAMENTS = "tournaments";
 export const USERS = "users";
+export const STATS = "stats";
 export const ROSTERS = "rosters";
 export const GROUPS = "groups";
+export const SEATINGS = "seatings";
+export const TIMERS = "timers";
+export const DISPLAYS = "displays";
 
 /** Firestore hands back Timestamps, numbers or strings depending on the writer. */
 export function toIsoDate(value: unknown): string | null {

@@ -1,6 +1,8 @@
 import {
   db,
   FieldValue,
+  STATS,
+  TIMERS,
   TOURNAMENTS,
   USERS,
   toStatsDate,
@@ -8,6 +10,7 @@ import {
 import { badRequest, conflict } from "../lib/errors";
 import type { PlayerSummary, Tournament, TournamentResult } from "../types/models";
 import { assertKnownPlayer, prizePool } from "./participants";
+import { pickHistory, writeHistory } from "./stats";
 
 export interface FinalizeResultInput {
   uid?: string;
@@ -74,7 +77,10 @@ export function validateNoDuplicatePlayers(results: FinalizeResultInput[]): void
   }
 }
 
-/** Guards against paying out more than was ever collected. */
+/**
+ * The whole prize pool must be handed out — no more (you can't pay what wasn't
+ * collected) and no less (every euro is spoken for before a tournament closes).
+ */
 export function validateWinnings(results: FinalizeResultInput[], pool: number): void {
   const total = results.reduce((sum, r) => sum + r.winnings, 0);
   // A cent of tolerance so floating-point splits of an exact pool still pass.
@@ -82,6 +88,12 @@ export function validateWinnings(results: FinalizeResultInput[], pool: number): 
     throw badRequest(
       "INVALID_WINNINGS",
       `Total winnings (${total.toFixed(2)}) exceed the prize pool (${pool.toFixed(2)}).`,
+    );
+  }
+  if (total < pool - 0.01) {
+    throw badRequest(
+      "INVALID_WINNINGS",
+      `Distribute the whole prize pool: ${(pool - total).toFixed(2)} of ${pool.toFixed(2)} is still unassigned.`,
     );
   }
 }
@@ -131,23 +143,33 @@ export async function finalizeTournament(
 
   const date = toStatsDate(new Date());
   const tournamentRef = db().collection(TOURNAMENTS).doc(t.id);
+  const timerRef = db().collection(TIMERS).doc(t.id);
 
   await db().runTransaction(async (tx) => {
     // Firestore requires every read in a transaction to precede every write.
     const registered = stored.filter((r) => r.uid);
     const userRefs = registered.map((r) => db().collection(USERS).doc(r.uid as string));
     const userSnaps = userRefs.length > 0 ? await tx.getAll(...userRefs) : [];
+    // History rows live in `stats/{uid}` (owner-only); the user doc is read too
+    // for the existence check and the legacy `tournaments` fallback.
+    const statsRefs = registered.map((r) => db().collection(STATS).doc(r.uid as string));
+    const statsSnaps = statsRefs.length > 0 ? await tx.getAll(...statsRefs) : [];
 
     const fresh = await tx.get(tournamentRef);
     if (fresh.data()?.status === "finished") {
       throw conflict("ALREADY_FINALIZED", "That tournament has already been finalized.");
     }
+    // Finishing stops the blinds clock, if one is running for this tournament.
+    const timerSnap = await tx.get(timerRef);
 
     tx.update(tournamentRef, {
       status: "finished",
       results: stored,
       finalizedAt: FieldValue.serverTimestamp(),
     });
+    if (timerSnap.exists) {
+      tx.update(timerRef, { isRunning: false, levelEndsAtMs: null });
+    }
 
     // A result naming an account that no longer exists is refused rather than
     // skipped. Silently dropping it produced a finalization that reported a
@@ -169,12 +191,17 @@ export async function finalizeTournament(
     userSnaps.forEach((snap, i) => {
       const result = registered[i];
       const player = byUid.get(result.uid as string);
-      const current = Array.isArray(snap.data()?.tournaments) ? snap.data()!.tournaments : [];
+      const { rows: existing, hadLegacy } = pickHistory(statsSnaps[i], snap);
+      // The row id is deterministic (tournament:uid), and unfinalize removes
+      // exactly that row — so finish → restart → finish always nets one entry.
+      // Filtering here makes that hold even if a stale row survived somehow.
+      const rowId = `${t.id}:${result.uid}`;
+      const rows = existing.filter((row) => (row as { id?: string })?.id !== rowId);
       // Rebuys and add-ons are tracked as counts on the roster; the stats entry
       // wants the money they cost.
       const rebuyCost = ((player?.rebuys ?? 0) + (player?.addOns ?? 0)) * t.buyIn;
-      current.push({
-        id: `${t.id}:${result.uid}`,
+      const entry = {
+        id: rowId,
         date,
         title: t.name,
         buyin: t.buyIn,
@@ -185,10 +212,54 @@ export async function finalizeTournament(
         // already encodes both, but only as a string that has to be parsed.
         tournamentId: t.id,
         place: result.place,
-      });
-      tx.update(snap.ref, { tournaments: current });
+      };
+      writeHistory(tx, result.uid as string, [...rows, entry], hadLegacy);
     });
   });
 
   return stored;
+}
+
+/**
+ * Reverses a finalization so the organizer can fix a mistake: reopens the
+ * tournament, drops the stored standings, and removes the stats row this
+ * tournament added to every registered finisher's history. Atomic, like
+ * finalize. The clock is left stopped — the organizer restarts it if needed.
+ */
+export async function unfinalizeTournament(t: Tournament): Promise<void> {
+  if (t.status !== "finished") {
+    throw conflict("NOT_FINALIZED", "That tournament is not finished.");
+  }
+
+  const tournamentRef = db().collection(TOURNAMENTS).doc(t.id);
+  const registered = (t.results ?? []).filter((r) => r.uid);
+
+  await db().runTransaction(async (tx) => {
+    const userRefs = registered.map((r) => db().collection(USERS).doc(r.uid as string));
+    const userSnaps = userRefs.length > 0 ? await tx.getAll(...userRefs) : [];
+    const statsRefs = registered.map((r) => db().collection(STATS).doc(r.uid as string));
+    const statsSnaps = statsRefs.length > 0 ? await tx.getAll(...statsRefs) : [];
+
+    const fresh = await tx.get(tournamentRef);
+    if (fresh.data()?.status !== "finished") {
+      throw conflict("NOT_FINALIZED", "That tournament is not finished.");
+    }
+
+    tx.update(tournamentRef, {
+      status: "open",
+      results: FieldValue.delete(),
+      finalizedAt: FieldValue.delete(),
+    });
+
+    userSnaps.forEach((snap, i) => {
+      if (!snap.exists) return;
+      const uid = registered[i].uid as string;
+      const rowId = `${t.id}:${uid}`;
+      const { rows, hadLegacy } = pickHistory(statsSnaps[i], snap);
+      const next = rows.filter((row) => (row as { id?: string })?.id !== rowId);
+      if (next.length !== rows.length || hadLegacy) {
+        writeHistory(tx, uid, next, hadLegacy);
+      }
+    });
+  });
 }

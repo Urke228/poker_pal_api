@@ -3,7 +3,12 @@ import { requireAuth, uidOf, type AuthedRequest } from "../middleware/requireAut
 import { db, FieldValue, USERS } from "../lib/firestore";
 import { forbidden, notFound } from "../lib/errors";
 import { getStats } from "../services/stats";
-import { ensureProfileSchema } from "../validation/schemas";
+import {
+  assertCanView,
+  getTournamentOrThrow,
+  mapTournament,
+} from "../services/tournaments";
+import { ensureProfileSchema, featuredSchema } from "../validation/schemas";
 
 export const usersRouter = Router();
 usersRouter.use(requireAuth);
@@ -11,6 +16,26 @@ usersRouter.use(requireAuth);
 /** Default profile art, matching what the Flutter app bundles. */
 const DEFAULT_AVATAR = "lib/assets/images/avatars/avatar1.png";
 const DEFAULT_BACKGROUND = "lib/assets/images/backgrounds/background1.png";
+
+/**
+ * The public showcase: results a player chose to display on their profile.
+ * Written only by PUT /me/featured below, so the fields are authoritative —
+ * safe by construction (no buy-in or rebuy amounts), but still normalized on
+ * the way out so a malformed doc never leaks anything else.
+ */
+function mapFeatured(raw: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((item) => {
+    const r = (item ?? {}) as Record<string, unknown>;
+    return {
+      tournamentId: typeof r.tournamentId === "string" ? r.tournamentId : "",
+      name: typeof r.name === "string" ? r.name : "",
+      date: typeof r.date === "string" ? r.date : null,
+      place: typeof r.place === "number" ? r.place : null,
+      winnings: typeof r.winnings === "number" ? r.winnings : 0,
+    };
+  });
+}
 
 usersRouter.get("/me", async (req: AuthedRequest, res) => {
   const uid = uidOf(req);
@@ -21,8 +46,50 @@ usersRouter.get("/me", async (req: AuthedRequest, res) => {
     email: req.email ?? d.email ?? null,
     username: typeof d.username === "string" ? d.username : null,
     photoURL: typeof d.photoURL === "string" ? d.photoURL : DEFAULT_AVATAR,
+    backgroundURL: typeof d.backgroundURL === "string" ? d.backgroundURL : DEFAULT_BACKGROUND,
+    // Counts, not uids — the web profile only shows the numbers.
+    followers: Array.isArray(d.followers) ? d.followers.length : 0,
+    following: Array.isArray(d.following) ? d.following.length : 0,
     hasProfile: snap.exists,
+    featuredResults: mapFeatured(d.featuredResults),
   });
+});
+
+/**
+ * Sets which finished tournaments show on the caller's public profile.
+ *
+ * The client sends only tournament ids (plus an optional display name); the
+ * place and winnings are looked up in the real finalized standings here, so a
+ * player cannot fabricate a result — they can only choose to show one they
+ * actually earned. Items with no result for this player are skipped rather
+ * than rejected, so a stale selection never blocks the rest.
+ */
+usersRouter.put("/me/featured", async (req: AuthedRequest, res) => {
+  const uid = uidOf(req);
+  const { items } = featuredSchema.parse(req.body ?? {});
+
+  const seen = new Set<string>();
+  const featured: Array<Record<string, unknown>> = [];
+  for (const item of items) {
+    if (seen.has(item.tournamentId)) continue;
+    seen.add(item.tournamentId);
+
+    const t = mapTournament(await getTournamentOrThrow(item.tournamentId));
+    assertCanView(t, uid);
+    const result = (t.results ?? []).find((r) => r.uid === uid);
+    if (!result) continue;
+
+    featured.push({
+      tournamentId: t.id,
+      name: item.name?.trim() || t.name,
+      date: t.dateTime,
+      place: result.place,
+      winnings: result.winnings,
+    });
+  }
+
+  await db().collection(USERS).doc(uid).set({ featuredResults: featured }, { merge: true });
+  res.json({ featuredResults: featured });
 });
 
 /**
@@ -53,7 +120,6 @@ usersRouter.post("/ensure-profile", async (req: AuthedRequest, res) => {
     following: [],
     photoURL: DEFAULT_AVATAR,
     backgroundURL: DEFAULT_BACKGROUND,
-    tournaments: [],
   });
   res.status(201).json({ created: true, username });
 });
@@ -88,5 +154,6 @@ usersRouter.get("/:id", async (req, res) => {
     uid: snap.id,
     username: typeof d.username === "string" ? d.username : "Player",
     photoURL: typeof d.photoURL === "string" ? d.photoURL : DEFAULT_AVATAR,
+    featuredResults: mapFeatured(d.featuredResults),
   });
 });

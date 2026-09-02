@@ -104,6 +104,28 @@ describe("GET /users/:id/stats", () => {
   });
 });
 
+describe("history location", () => {
+  it("serves rows from the owner-only stats doc when it exists", async () => {
+    docs.set(`stats/${OWNER}`, {
+      tournaments: [
+        { id: "n1", date: "2026-09-01", title: "New location", buyin: 5, rebuy: 0, win: 15 },
+      ],
+    });
+    const res = await asOwner(request(app).get("/stats/me"));
+    expect(res.status).toBe(200);
+    // The stats doc wins over the legacy field still sitting on the user doc.
+    expect(res.body.entries).toHaveLength(1);
+    expect(res.body.entries[0].title).toBe("New location");
+  });
+
+  it("falls back to the legacy users field until migration", async () => {
+    // No stats doc seeded — the beforeEach user doc carries the legacy rows.
+    const res = await asOwner(request(app).get("/stats/me"));
+    expect(res.status).toBe(200);
+    expect(res.body.entries[0].title).toBe("Friday game");
+  });
+});
+
 describe("GET /stats/me", () => {
   it("still serves the caller their own private statistics", async () => {
     const res = await asOwner(request(app).get("/stats/me"));

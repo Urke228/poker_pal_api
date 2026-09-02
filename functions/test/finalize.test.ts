@@ -162,6 +162,17 @@ describe("validateWinnings", () => {
     ).toBe("INVALID_WINNINGS");
   });
 
+  it("rejects leaving part of the pool unassigned", () => {
+    // The whole pool must be handed out before a tournament can close.
+    expect(
+      codeOf(() => validateWinnings([{ uid: "u1", place: 1, winnings: 50 }], 80)),
+    ).toBe("INVALID_WINNINGS");
+  });
+
+  it("accepts an empty pool with no winnings (free game)", () => {
+    expect(() => validateWinnings([{ uid: "u1", place: 1, winnings: 0 }], 0)).not.toThrow();
+  });
+
   it("tolerates a rounding cent from split percentages", () => {
     expect(() =>
       validateWinnings(

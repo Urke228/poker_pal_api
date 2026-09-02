@@ -43,17 +43,32 @@ service cloud.firestore {
       allow read: if signedIn();
       allow create, delete: if signedIn() && request.auth.uid == userId;
 
-      // Owners can edit their own profile, EXCEPT the `tournaments` array:
-      // that is the results history, written only by the API (which appends
-      // to it when a tournament is finalized). Leaving it client-writable
-      // would let a player edit their own record after the fact.
+      // Owners can edit their own profile, EXCEPT:
+      //  - `tournaments` — the legacy results-history field (the history now
+      //    lives in `stats/{uid}`; this stays excluded so a client can never
+      //    reintroduce or edit it),
+      //  - `featuredResults` — the public showcase, written only by the API
+      //    (PUT /users/me/featured), which copies place and winnings from the
+      //    real finalized standings. Client-writable, a player could invent
+      //    a first place.
       //
       // Anyone else may only follow/unfollow (add or remove themselves from
       // `followers`).
       allow update: if signedIn() && (
-        (request.auth.uid == userId && !changedKeys().hasAny(['tournaments'])) ||
+        (request.auth.uid == userId &&
+          !changedKeys().hasAny(['tournaments', 'featuredResults'])) ||
         (changedKeys().hasOnly(['followers']) && followersChangeIsValid())
       );
+    }
+
+    /* ─────────────────────  STATS (private history)  ───────────────────── */
+    // A player's full results history — every buy-in, rebuy and payout. This
+    // used to be a field on the public profile doc, readable by any signed-in
+    // user; it now lives here so only its owner can read it. All writes go
+    // through the API (Admin SDK, bypasses these rules).
+    match /stats/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow write: if false;
     }
 
     /* ─────────────────────  TOURNAMENTS  ───────────────────── */
@@ -97,9 +112,8 @@ service cloud.firestore {
       allow write: if false;
     }
 
-    /* ──────────────  TOURNAMENT METADATA (forward-looking)  ────────────── */
-    // Not written by the current app code yet — kept for planned features.
-    match /tournament_metadata/{tournamentId} {
+    /* ──────────────  TIMERS (blinds clock)  ────────────── */
+    match /timers/{timerId} {
       allow read: if signedIn();
       allow create: if signedIn() &&
         request.resource.data.createdBy == request.auth.uid;
@@ -107,13 +121,28 @@ service cloud.firestore {
         resource.data.createdBy == request.auth.uid;
     }
 
-    /* ──────────────  TIMERS (blinds clock, forward-looking)  ────────────── */
-    match /timers/{timerId} {
+    /* ──────────────  DISPLAYS (phone → TV remote control)  ────────────── */
+    // A tiny real-time control doc: the organizer's phone sets which display
+    // tab the TV shows and bumps a refresh signal; the web display subscribes
+    // and follows. Same shape as timers — any signed-in user may read (the TV
+    // and any viewer follow along), only the doc's creator (the organizer)
+    // writes. This is a deliberate real-time exception, like the clock.
+    match /displays/{tournamentId} {
       allow read: if signedIn();
       allow create: if signedIn() &&
         request.resource.data.createdBy == request.auth.uid;
       allow update, delete: if signedIn() &&
         resource.data.createdBy == request.auth.uid;
+    }
+
+    /* ──────────────  SEATINGS (published seating charts)  ────────────── */
+    // API-only, like tournaments: the organizer app publishes a chart through
+    // POST /tournaments/:id/seating and the web display reads it through
+    // GET /tournaments/:id/seating (Admin SDK, which ignores these rules). No
+    // client touches the collection directly, and a chart carries player names,
+    // so all direct access is denied.
+    match /seatings/{tournamentId} {
+      allow read, write: if false;
     }
 
     /* ──────────────  ROSTERS (players lists / payments)  ────────────── */
